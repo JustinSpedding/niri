@@ -4823,7 +4823,7 @@ fn find_bind<'a>(
     let raw = raw?;
 
     let trigger = if mod_key.matches_keysym(raw) {
-        Trigger::KeyCompositor
+        Trigger::CompositorMod
     } else {
         Trigger::Keysym(raw)
     };
@@ -4852,7 +4852,7 @@ fn find_configured_bind<'a>(
     // If so, we need to remove its modifier from the current modifiers since the key is the
     // trigger, not a modifier.
     let trigger_is_modifier = match trigger {
-        Trigger::KeyCompositor => true,
+        Trigger::CompositorMod => true,
         Trigger::Keysym(keysym) => keysym.is_modifier_key(),
         _ => false,
     };
@@ -4861,7 +4861,7 @@ fn find_configured_bind<'a>(
     // `Super_L` when the mod key is Super). In this case its modifier is part of the trigger,
     // not a held modifier.
     let trigger_is_mod_key = match trigger {
-        Trigger::KeyCompositor => true,
+        Trigger::CompositorMod => true,
         Trigger::Keysym(keysym) => trigger_is_modifier && mod_key.matches_keysym(keysym),
         _ => false,
     };
@@ -5857,7 +5857,7 @@ mod tests {
             // A compositor-only release binding which toggles the overview
             Bind {
                 key: Key {
-                    trigger: Trigger::KeyCompositor,
+                    trigger: Trigger::CompositorMod,
                     modifiers: Modifiers::empty(),
                 },
                 press_action: None,
@@ -6015,7 +6015,7 @@ mod tests {
             // A compositor-only release binding which can't be invalidated
             Bind {
                 key: Key {
-                    trigger: Trigger::KeyCompositor,
+                    trigger: Trigger::CompositorMod,
                     modifiers: Modifiers::empty(),
                 },
                 press_action: None,
