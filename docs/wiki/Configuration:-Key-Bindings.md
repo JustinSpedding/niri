@@ -139,17 +139,9 @@ binds {
 }
 ```
 
-Release binds will normally only trigger if no other keys were released and no keys or mouse buttons were pressed after the bound key was pressed.
-If you want a release bind to always trigger regardless, set `allow-invalidation=false`:
-
-```kdl
-binds {
-    Mod allow-invalidation=false { release { toggle-overview; }; }
-}
-```
-
-Note that the modifiers of the bind itself (e.g. `Mod` in `Mod+T`) must still be held when the key is released, both for regular and invalidated releases.
-Extra modifiers that are not part of the bind are only allowed when `allow-invalidation=false`.
+The modifiers of the bind itself (e.g. `Mod` in `Mod+T`) must be held when the key is pressed.
+When they are, the key press is intercepted and the release action triggers when the key is released, regardless of the modifiers held at that point or any other input in between.
+If the modifiers did not match when the key was pressed, the release action never triggers.
 
 ### Scroll Bindings
 

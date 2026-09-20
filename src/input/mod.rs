@@ -1,6 +1,6 @@
 use std::any::Any;
 use std::collections::hash_map::Entry;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use calloop::timer::{TimeoutAction, Timer};
@@ -441,10 +441,6 @@ impl State {
             }
         }
 
-        // Cross-invalidation: clear other release triggers.
-        self.niri.valid_mouse_release_trigger = None;
-        self.niri.valid_tablet_release_trigger = None;
-
         if pressed {
             self.hide_cursor_if_needed();
         }
@@ -575,6 +571,7 @@ impl State {
 
                     should_intercept_key(
                         &mut this.niri.suppressed_keys,
+                        &mut this.niri.pending_release_binds,
                         bindings,
                         mod_key,
                         key_code,
@@ -585,7 +582,6 @@ impl State {
                         &this.niri.screenshot_ui,
                         this.niri.config.borrow().input.disable_power_key_handling,
                         is_inhibiting_shortcuts,
-                        &mut this.niri.valid_release_trigger,
                     )
                 };
 
@@ -759,13 +755,13 @@ impl State {
                 self.backend.change_vt(vt);
                 // Changing VT may not deliver the key releases, so clear the state.
                 self.niri.suppressed_keys.clear();
-                self.niri.valid_release_trigger = None;
+                self.niri.pending_release_binds.clear();
             }
             Action::Suspend => {
                 self.backend.suspend();
                 // Suspend may not deliver the key releases, so clear the state.
                 self.niri.suppressed_keys.clear();
-                self.niri.valid_release_trigger = None;
+                self.niri.pending_release_binds.clear();
             }
             Action::PowerOffMonitors => {
                 self.niri.deactivate_monitors(&mut self.backend);
@@ -2833,43 +2829,16 @@ impl State {
 
         let mod_key = self.backend.mod_key(&self.niri.config.borrow());
 
-        let valid_mouse_release_trigger = if button_state == ButtonState::Pressed {
-            self.niri.valid_mouse_release_trigger.replace(button_code)
-        } else {
-            self.niri.valid_mouse_release_trigger.take()
-        };
-
         let mods = self.niri.seat.get_keyboard().unwrap().modifier_state();
         let modifiers = modifiers_from_state(mods);
         let mod_down = modifiers.contains(mod_key.to_modifiers());
 
         if ButtonState::Released == button_state {
-            if let Some(bind) = match button {
-                Some(MouseButton::Left) => Some(Trigger::MouseLeft),
-                Some(MouseButton::Right) => Some(Trigger::MouseRight),
-                Some(MouseButton::Middle) => Some(Trigger::MouseMiddle),
-                Some(MouseButton::Back) => Some(Trigger::MouseBack),
-                Some(MouseButton::Forward) => Some(Trigger::MouseForward),
-                _ => None,
+            if let Some(bind) = self.niri.pending_mouse_release_binds.remove(&button_code) {
+                self.niri.suppressed_buttons.remove(&button_code);
+                self.handle_bind(bind, false);
+                return;
             }
-            .and_then(|trigger| {
-                let config = self.niri.config.borrow();
-                let bindings = make_binds_iter(&config, &mut self.niri.window_mru_ui, modifiers);
-                find_configured_bind(bindings, mod_key, trigger, mods, false)
-            })
-            .filter(|bind| {
-                !self.niri.screenshot_ui.is_open()
-                    || allowed_during_screenshot(bind.release_action.as_ref())
-            }) {
-                if bind.has_release()
-                    && (valid_mouse_release_trigger == Some(button_code)
-                        || !bind.allow_invalidation)
-                {
-                    self.niri.suppressed_buttons.remove(&button_code);
-                    self.handle_bind(bind.clone(), false);
-                    return;
-                }
-            };
         }
 
         if self.niri.suppressed_buttons.remove(&button_code) {
@@ -2877,9 +2846,6 @@ impl State {
         }
 
         if ButtonState::Pressed == button_state {
-            self.niri.valid_release_trigger = None;
-            self.niri.valid_tablet_release_trigger = None;
-
             let mut is_mru_open = false;
             if let Some(mru_output) = self.niri.window_mru_ui.output() {
                 is_mru_open = true;
@@ -2915,18 +2881,24 @@ impl State {
                     let config = self.niri.config.borrow();
                     let bindings =
                         make_binds_iter(&config, &mut self.niri.window_mru_ui, modifiers);
-                    find_configured_bind(bindings, mod_key, trigger, mods, true)
+                    find_configured_bind(bindings.clone(), mod_key, trigger, mods, true)
+                        .or_else(|| find_configured_bind(bindings, mod_key, trigger, mods, false))
                 })
                 .filter(|bind| {
                     !self.niri.screenshot_ui.is_open()
-                        || allowed_during_screenshot(bind.press_action.as_ref())
+                        || allowed_during_screenshot(bind.action_for(bind.has_press()))
                 }) {
-                    if bind.has_press() {
-                        self.niri.suppressed_buttons.insert(button_code);
-                        self.handle_bind(bind.clone(), true);
-                        return;
+                    self.niri.suppressed_buttons.insert(button_code);
+                    if bind.has_release() {
+                        self.niri
+                            .pending_mouse_release_binds
+                            .insert(button_code, bind.clone());
                     }
-                };
+                    if bind.has_press() {
+                        self.handle_bind(bind.clone(), true);
+                    }
+                    return;
+                }
             }
 
             // We received an event for the regular pointer, so show it now.
@@ -3237,8 +3209,6 @@ impl State {
                 || is_mru_open
                 || self.niri.mods_with_wheel_binds.contains(&modifiers);
             if should_handle {
-                self.niri.valid_release_trigger = None;
-
                 let horizontal = horizontal_amount_v120.unwrap_or(0.);
                 let ticks = self.niri.horizontal_wheel_tracker.accumulate(horizontal);
                 if ticks != 0 {
@@ -3255,7 +3225,6 @@ impl State {
                                 cooldown: None,
                                 allow_when_locked: false,
                                 allow_inhibiting: false,
-                                allow_invalidation: false,
                                 hotkey_overlay_title: None,
                             });
                             let bind_right = Some(Bind {
@@ -3269,7 +3238,6 @@ impl State {
                                 cooldown: None,
                                 allow_when_locked: false,
                                 allow_inhibiting: false,
-                                allow_invalidation: false,
                                 hotkey_overlay_title: None,
                             });
                             (bind_left, bind_right)
@@ -3330,7 +3298,6 @@ impl State {
                             cooldown: Some(Duration::from_millis(50)),
                             allow_when_locked: false,
                             allow_inhibiting: false,
-                            allow_invalidation: false,
                             hotkey_overlay_title: None,
                         });
                         let bind_down = Some(Bind {
@@ -3344,7 +3311,6 @@ impl State {
                             cooldown: Some(Duration::from_millis(50)),
                             allow_when_locked: false,
                             allow_inhibiting: false,
-                            allow_invalidation: false,
                             hotkey_overlay_title: None,
                         });
                         (bind_up, bind_down)
@@ -3360,7 +3326,6 @@ impl State {
                             cooldown: Some(Duration::from_millis(50)),
                             allow_when_locked: false,
                             allow_inhibiting: false,
-                            allow_invalidation: false,
                             hotkey_overlay_title: None,
                         });
                         let bind_down = Some(Bind {
@@ -3374,7 +3339,6 @@ impl State {
                             cooldown: Some(Duration::from_millis(50)),
                             allow_when_locked: false,
                             allow_inhibiting: false,
-                            allow_invalidation: false,
                             hotkey_overlay_title: None,
                         });
                         (bind_up, bind_down)
@@ -3533,7 +3497,6 @@ impl State {
             }
 
             if is_mru_open || self.niri.mods_with_finger_scroll_binds.contains(&modifiers) {
-                self.niri.valid_release_trigger = None;
                 let ticks = self
                     .niri
                     .horizontal_finger_scroll_tracker
@@ -4000,12 +3963,6 @@ impl State {
 
             let mod_key = self.backend.mod_key(&self.niri.config.borrow());
 
-            let valid_tablet_release_trigger = if button_state == ButtonState::Pressed {
-                self.niri.valid_tablet_release_trigger.replace(button)
-            } else {
-                self.niri.valid_tablet_release_trigger.take()
-            };
-
             let trigger = match button {
                 BTN_STYLUS => Some(Trigger::TabletStylusButton1),
                 BTN_STYLUS2 => Some(Trigger::TabletStylusButton2),
@@ -4014,28 +3971,11 @@ impl State {
             };
 
             // Handle release binds.
-            if let Some(trigger) = trigger {
-                if button_state == ButtonState::Released {
-                    let mods = self.niri.seat.get_keyboard().unwrap().modifier_state();
-
-                    if let Some(bind) = {
-                        let config = self.niri.config.borrow();
-                        let bindings = config.binds.0.iter();
-                        find_configured_bind(bindings, mod_key, trigger, mods, false)
-                    }
-                    .filter(|bind| {
-                        !self.niri.screenshot_ui.is_open()
-                            || allowed_during_screenshot(bind.release_action.as_ref())
-                    }) {
-                        if bind.has_release()
-                            && (valid_tablet_release_trigger == Some(button)
-                                || !bind.allow_invalidation)
-                        {
-                            self.niri.suppressed_buttons.remove(&button);
-                            self.handle_bind(bind.clone(), false);
-                            return;
-                        }
-                    };
+            if button_state == ButtonState::Released {
+                if let Some(bind) = self.niri.pending_tablet_release_binds.remove(&button) {
+                    self.niri.suppressed_buttons.remove(&button);
+                    self.handle_bind(bind, false);
+                    return;
                 }
             }
 
@@ -4046,10 +3986,6 @@ impl State {
             // Handle press binds.
             if let Some(trigger) = trigger {
                 if button_state == ButtonState::Pressed {
-                    // Cross-invalidation: clear other release triggers.
-                    self.niri.valid_release_trigger = None;
-                    self.niri.valid_mouse_release_trigger = None;
-
                     let mods = self.niri.seat.get_keyboard().unwrap().modifier_state();
                     let modifiers = modifiers_from_state(mods);
 
@@ -4057,15 +3993,25 @@ impl State {
                         let bind = {
                             let config = self.niri.config.borrow();
                             let bindings = config.binds.0.iter();
-                            find_configured_bind(bindings, mod_key, trigger, mods, true)
+                            find_configured_bind(bindings.clone(), mod_key, trigger, mods, true)
+                                .or_else(|| {
+                                    find_configured_bind(bindings, mod_key, trigger, mods, false)
+                                })
                         }
                         .filter(|bind| {
                             !self.niri.screenshot_ui.is_open()
-                                || allowed_during_screenshot(bind.press_action.as_ref())
+                                || allowed_during_screenshot(bind.action_for(bind.has_press()))
                         });
                         if let Some(bind) = bind {
                             self.niri.suppressed_buttons.insert(button);
-                            self.handle_bind(bind.clone(), true);
+                            if bind.has_release() {
+                                self.niri
+                                    .pending_tablet_release_binds
+                                    .insert(button, bind.clone());
+                            }
+                            if bind.has_press() {
+                                self.handle_bind(bind.clone(), true);
+                            }
                             return;
                         }
                     }
@@ -4651,12 +4597,18 @@ impl State {
     }
 }
 
-/// Check whether the key should be intercepted and mark intercepted
-/// pressed keys as `suppressed`, thus preventing `releases` corresponding
-/// to them from being delivered.
+/// Checks whether the key should be intercepted, and tracks the presses of intercepted keys.
+///
+/// An intercepted key press is recorded in `suppressed_keys`, which prevents its release from
+/// being forwarded to clients. If the matching bind has a release action, the bind is also
+/// recorded in `pending_release_binds`, so that its release action triggers when the key is
+/// released, regardless of the modifiers held at that point and of any input in between.
+///
+/// A release action only triggers if the bind's modifiers matched when the key was pressed.
 #[allow(clippy::too_many_arguments)]
 fn should_intercept_key<'a>(
     suppressed_keys: &mut HashSet<Keycode>,
+    pending_release_binds: &mut HashMap<Keycode, Bind>,
     bindings: impl IntoIterator<Item = &'a Bind> + Clone,
     mod_key: ModKey,
     key_code: Keycode,
@@ -4667,27 +4619,33 @@ fn should_intercept_key<'a>(
     screenshot_ui: &ScreenshotUi,
     disable_power_key_handling: bool,
     is_inhibiting_shortcuts: bool,
-    valid_release_trigger: &mut Option<Keycode>,
 ) -> ShouldInterceptResult {
-    let mut final_bind = find_bind(
-        bindings,
-        mod_key,
-        modified,
-        raw,
-        mods,
-        disable_power_key_handling,
-        pressed,
-    );
+    if !pressed {
+        if let Some(bind) = pending_release_binds.remove(&key_code) {
+            if suppressed_keys.remove(&key_code) {
+                return ShouldInterceptResult::InterceptAndHandle(bind);
+            } else {
+                return ShouldInterceptResult::ForwardAndHandle(bind);
+            }
+        }
+    }
 
-    let valid_release_trigger = if pressed && !is_inhibiting_shortcuts {
-        valid_release_trigger.replace(key_code)
+    let mut final_bind = if pressed {
+        find_bind(
+            bindings,
+            mod_key,
+            modified,
+            raw,
+            mods,
+            disable_power_key_handling,
+        )
     } else {
-        valid_release_trigger.take()
+        None
     };
 
     // Allow only a subset of compositor actions while the screenshot UI is open, since the user
     // cannot see the screen.
-    if screenshot_ui.is_open() {
+    if pressed && screenshot_ui.is_open() {
         let mut use_screenshot_ui_action = true;
 
         if let Some(bind) = &final_bind {
@@ -4715,7 +4673,6 @@ fn should_intercept_key<'a>(
                     // But logically, nothing can inhibit its actions. Only opening it can be
                     // inhibited.
                     allow_inhibiting: false,
-                    allow_invalidation: true,
                     hotkey_overlay_title: None,
                 });
             }
@@ -4727,6 +4684,9 @@ fn should_intercept_key<'a>(
             if is_inhibiting_shortcuts && bind.allow_inhibiting {
                 ShouldInterceptResult::Forward
             } else if modified.is_modifier_key() {
+                if bind.has_release() {
+                    pending_release_binds.insert(key_code, bind.clone());
+                }
                 if bind.has_press() {
                     ShouldInterceptResult::ForwardAndHandle(bind)
                 } else {
@@ -4734,42 +4694,24 @@ fn should_intercept_key<'a>(
                 }
             } else {
                 suppressed_keys.insert(key_code);
-                if bind.is_release_only() {
-                    // If this is a release-only bind it should still be intercepted. This does mean
-                    // it can be intercepted and then not end up being part of a real bind, but
-                    // that's very much an edge case and better than failing to intercept a
-                    // keystroke that a user intended to invoke a bind.
-                    ShouldInterceptResult::InterceptOnly
-                } else {
+                if bind.has_release() {
+                    pending_release_binds.insert(key_code, bind.clone());
+                }
+                if bind.has_press() {
                     ShouldInterceptResult::InterceptAndHandle(bind)
+                } else {
+                    // Release-only bind: intercept the key press so that it doesn't reach the
+                    // client, and remember to trigger the release action when the key is
+                    // released.
+                    ShouldInterceptResult::InterceptOnly
                 }
             }
         }
-        (final_bind, false) if suppressed_keys.contains(&key_code) => {
+        (_, false) if suppressed_keys.contains(&key_code) => {
             // We don't need to check for shortcut inhibition here because
             // if it was inhibited on press it wouldn't be suppressed.
             suppressed_keys.remove(&key_code);
-
-            // If this is a valid release bind, handle it
-            if let Some(bind) = final_bind {
-                if bind.has_release()
-                    && (valid_release_trigger == Some(key_code) || !bind.allow_invalidation)
-                {
-                    ShouldInterceptResult::InterceptAndHandle(bind)
-                } else {
-                    ShouldInterceptResult::InterceptOnly
-                }
-            } else {
-                ShouldInterceptResult::InterceptOnly
-            }
-        }
-        (Some(bind), false)
-            if bind.has_release()
-                && (valid_release_trigger == Some(key_code) || !bind.allow_invalidation) =>
-        {
-            // We don't need to check for shortcut inhibition here because if
-            // it was inhibited on press it wouldn't be in valid_release_trigger.
-            ShouldInterceptResult::ForwardAndHandle(bind)
+            ShouldInterceptResult::InterceptOnly
         }
         _ => ShouldInterceptResult::Forward,
     }
@@ -4782,7 +4724,6 @@ fn find_bind<'a>(
     raw: Option<Keysym>,
     mods: ModifiersState,
     disable_power_key_handling: bool,
-    pressed: bool,
 ) -> Option<Bind> {
     use keysyms::*;
 
@@ -4815,7 +4756,6 @@ fn find_bind<'a>(
             // It also makes no sense to inhibit the default power key handling.
             // Hardcoded binds must never be inhibited.
             allow_inhibiting: false,
-            allow_invalidation: false,
             hotkey_overlay_title: None,
         });
     }
@@ -4831,11 +4771,11 @@ fn find_bind<'a>(
     // It would maybe be better to return all matching binds instead of using a parameter to
     // prioritize them, but that would complicate things for the callers and right now there aren't
     // any that need more than one.
-    if let Some(bind) = find_configured_bind(bindings.clone(), mod_key, trigger, mods, pressed) {
-        Some(bind)
-    } else {
-        find_configured_bind(bindings, mod_key, trigger, mods, !pressed)
-    }
+    //
+    // Prefer press binds, but fall back to release-only binds so that the key press can be
+    // intercepted and its release action triggered when the key is released.
+    find_configured_bind(bindings.clone(), mod_key, trigger, mods, true)
+        .or_else(|| find_configured_bind(bindings, mod_key, trigger, mods, false))
 }
 
 fn find_configured_bind<'a>(
@@ -4880,10 +4820,6 @@ fn find_configured_bind<'a>(
     }
 
     // If there is an exact match, return it.
-    // Otherwise, if allow-invalidation=false, return the first bind whose modifiers are a subset of
-    // the held modifiers.
-    let mut relaxed_match = None;
-
     for bind in bindings {
         let is_press_bind = bind.press_action.is_some();
         let is_release_bind = bind.release_action.is_some();
@@ -4907,17 +4843,9 @@ fn find_configured_bind<'a>(
         if bind_modifiers == modifiers {
             return Some(bind.clone());
         }
-
-        if !pressed
-            && !bind.allow_invalidation
-            && relaxed_match.is_none()
-            && modifiers.contains(bind_modifiers)
-        {
-            relaxed_match = Some(bind);
-        }
     }
 
-    relaxed_match.cloned()
+    None
 }
 
 /// Convert a modifier keysym to its corresponding Modifiers flags.
@@ -5139,7 +5067,6 @@ fn hardcoded_overview_bind(raw: Keysym, mods: ModifiersState) -> Option<Bind> {
         cooldown: None,
         allow_when_locked: false,
         allow_inhibiting: false,
-        allow_invalidation: false,
         hotkey_overlay_title: None,
     })
 }
@@ -5568,14 +5495,12 @@ mod tests {
     const MOD_KEY_CODE: Keycode = Keycode::new(MOD_KEYSYM.raw());
     const CTRL_KEYSYM: Keysym = Keysym::Control_L;
     const CTRL_KEY_CODE: Keycode = Keycode::new(CTRL_KEYSYM.raw());
-    const SHIFT_KEYSYM: Keysym = Keysym::Shift_L;
-    const SHIFT_KEY_CODE: Keycode = Keycode::new(SHIFT_KEYSYM.raw());
     struct TestState {
         screenshot_ui: ScreenshotUi,
         disable_power_key_handling: bool,
         is_inhibiting: bool,
         suppressed_keys: HashSet<Keycode>,
-        valid_release_trigger: Option<Keycode>,
+        pending_release_binds: HashMap<Keycode, Bind>,
     }
 
     fn create_test_state() -> TestState {
@@ -5584,7 +5509,7 @@ mod tests {
             disable_power_key_handling: false,
             is_inhibiting: false,
             suppressed_keys: HashSet::new(),
-            valid_release_trigger: None,
+            pending_release_binds: HashMap::new(),
         }
     }
 
@@ -5596,6 +5521,7 @@ mod tests {
     ) -> ShouldInterceptResult {
         should_intercept_key(
             &mut state.suppressed_keys,
+            &mut state.pending_release_binds,
             &bindings.0,
             ModKey::Super,
             CLOSE_KEY_CODE,
@@ -5606,7 +5532,6 @@ mod tests {
             &state.screenshot_ui,
             state.disable_power_key_handling,
             state.is_inhibiting,
-            &mut state.valid_release_trigger,
         )
     }
 
@@ -5618,6 +5543,7 @@ mod tests {
     ) -> ShouldInterceptResult {
         should_intercept_key(
             &mut state.suppressed_keys,
+            &mut state.pending_release_binds,
             &bindings.0,
             ModKey::Super,
             OTHER_KEY_CODE,
@@ -5628,7 +5554,6 @@ mod tests {
             &state.screenshot_ui,
             state.disable_power_key_handling,
             state.is_inhibiting,
-            &mut state.valid_release_trigger,
         )
     }
 
@@ -5640,6 +5565,7 @@ mod tests {
     ) -> ShouldInterceptResult {
         should_intercept_key(
             &mut state.suppressed_keys,
+            &mut state.pending_release_binds,
             &bindings.0,
             ModKey::Super,
             NONE_KEY_CODE,
@@ -5650,7 +5576,6 @@ mod tests {
             &state.screenshot_ui,
             state.disable_power_key_handling,
             state.is_inhibiting,
-            &mut state.valid_release_trigger,
         )
     }
 
@@ -5663,6 +5588,7 @@ mod tests {
         mods.logo = pressed;
         should_intercept_key(
             &mut state.suppressed_keys,
+            &mut state.pending_release_binds,
             &bindings.0,
             ModKey::Super,
             MOD_KEY_CODE,
@@ -5673,7 +5599,6 @@ mod tests {
             &state.screenshot_ui,
             state.disable_power_key_handling,
             state.is_inhibiting,
-            &mut state.valid_release_trigger,
         )
     }
 
@@ -5685,6 +5610,7 @@ mod tests {
     ) -> ShouldInterceptResult {
         should_intercept_key(
             &mut state.suppressed_keys,
+            &mut state.pending_release_binds,
             &bindings.0,
             ModKey::Super,
             CTRL_KEY_CODE,
@@ -5695,7 +5621,6 @@ mod tests {
             &state.screenshot_ui,
             state.disable_power_key_handling,
             state.is_inhibiting,
-            &mut state.valid_release_trigger,
         )
     }
 
@@ -5725,16 +5650,17 @@ mod tests {
             cooldown: None,
             allow_when_locked: false,
             allow_inhibiting: true,
-            allow_invalidation: true,
             hotkey_overlay_title: None,
         }]);
 
         let mut common_state = create_test_state();
-        let mut mods: ModifiersState = Default::default();
 
         // Action press/release.
-        mods.logo = true;
-        mods.ctrl = true;
+        let mut mods = ModifiersState {
+            logo: true,
+            ctrl: true,
+            ..Default::default()
+        };
         let filter = process_close_key(&mut common_state, &bindings, mods, true);
         assert_matches!(
             filter,
@@ -5866,7 +5792,6 @@ mod tests {
                 cooldown: None,
                 allow_when_locked: false,
                 allow_inhibiting: true,
-                allow_invalidation: true,
                 hotkey_overlay_title: None,
             },
             // Another release binding on the close key
@@ -5881,7 +5806,6 @@ mod tests {
                 cooldown: None,
                 allow_when_locked: false,
                 allow_inhibiting: true,
-                allow_invalidation: true,
                 hotkey_overlay_title: None,
             },
             // A normal binding for centering the column on the other key
@@ -5896,7 +5820,6 @@ mod tests {
                 cooldown: None,
                 allow_when_locked: false,
                 allow_inhibiting: true,
-                allow_invalidation: true,
                 hotkey_overlay_title: None,
             },
         ]);
@@ -5918,9 +5841,9 @@ mod tests {
             })
         );
         assert!(common_state.suppressed_keys.is_empty());
-        assert!(mods.logo == false);
+        assert!(!mods.logo);
 
-        // But not if a different key has been pressed in between
+        // A different key pressed in between doesn't prevent the release bind from triggering
         let result = process_mod_key(&mut common_state, &bindings, &mut mods, true);
         assert_matches!(result, ShouldInterceptResult::Forward);
 
@@ -5928,12 +5851,18 @@ mod tests {
         assert_matches!(result, ShouldInterceptResult::Forward);
 
         let result = process_mod_key(&mut common_state, &bindings, &mut mods, false);
-        assert_matches!(result, ShouldInterceptResult::Forward);
+        assert_matches!(
+            result,
+            ShouldInterceptResult::ForwardAndHandle(Bind {
+                release_action: Some(Action::ToggleOverview),
+                ..
+            })
+        );
 
         let result = process_none_key(&mut common_state, &bindings, mods, false);
         assert_matches!(result, ShouldInterceptResult::Forward);
 
-        // Especially if the other key triggered a binding
+        // The same applies if the other key triggered a binding
         let result = process_mod_key(&mut common_state, &bindings, &mut mods, true);
         assert_matches!(result, ShouldInterceptResult::Forward);
 
@@ -5947,13 +5876,18 @@ mod tests {
         );
 
         let result = process_mod_key(&mut common_state, &bindings, &mut mods, false);
-        assert_matches!(result, ShouldInterceptResult::Forward);
+        assert_matches!(
+            result,
+            ShouldInterceptResult::ForwardAndHandle(Bind {
+                release_action: Some(Action::ToggleOverview),
+                ..
+            })
+        );
 
         let result = process_other_key(&mut common_state, &bindings, mods, false);
         assert_matches!(result, ShouldInterceptResult::InterceptOnly);
 
-        // If the other key has a release binding neither should fire when
-        // they're released in the wrong order.
+        // Release binds on regular keys fire regardless of the release order
         let result = process_mod_key(&mut common_state, &bindings, &mut mods, true);
         assert_matches!(result, ShouldInterceptResult::Forward);
 
@@ -5961,12 +5895,24 @@ mod tests {
         assert_matches!(result, ShouldInterceptResult::InterceptOnly);
 
         let result = process_mod_key(&mut common_state, &bindings, &mut mods, false);
-        assert_matches!(result, ShouldInterceptResult::Forward);
+        assert_matches!(
+            result,
+            ShouldInterceptResult::ForwardAndHandle(Bind {
+                release_action: Some(Action::ToggleOverview),
+                ..
+            })
+        );
 
         let result = process_close_key(&mut common_state, &bindings, mods, false);
-        assert_matches!(result, ShouldInterceptResult::InterceptOnly);
+        assert_matches!(
+            result,
+            ShouldInterceptResult::InterceptAndHandle(Bind {
+                release_action: Some(Action::CloseWindow),
+                ..
+            })
+        );
 
-        // But it should work in the correct order.
+        // And in the correct order.
         let result = process_mod_key(&mut common_state, &bindings, &mut mods, true);
         assert_matches!(result, ShouldInterceptResult::Forward);
 
@@ -5983,7 +5929,13 @@ mod tests {
         );
 
         let result = process_mod_key(&mut common_state, &bindings, &mut mods, false);
-        assert_matches!(result, ShouldInterceptResult::Forward);
+        assert_matches!(
+            result,
+            ShouldInterceptResult::ForwardAndHandle(Bind {
+                release_action: Some(Action::ToggleOverview),
+                ..
+            })
+        );
 
         // Test case: inhibited release bindings
         common_state.is_inhibiting = true;
@@ -6010,86 +5962,200 @@ mod tests {
     }
 
     #[test]
-    fn test_non_invalidatable_bindings() {
-        let bindings = Binds(vec![
-            // A compositor-only release binding which can't be invalidated
-            Bind {
-                key: Key {
-                    trigger: Trigger::CompositorMod,
-                    modifiers: Modifiers::empty(),
-                },
-                press_action: None,
-                release_action: Some(Action::ToggleOverview),
-                repeat: true,
-                cooldown: None,
-                allow_when_locked: false,
-                allow_inhibiting: true,
-                allow_invalidation: false,
-                hotkey_overlay_title: None,
+    fn press_and_release_bind_release_regardless_of_modifiers() {
+        let bindings = Binds(vec![Bind {
+            key: Key {
+                trigger: Trigger::Keysym(CLOSE_KEYSYM),
+                modifiers: Modifiers::COMPOSITOR,
             },
-            // Another release binding on the close key
-            Bind {
-                key: Key {
-                    trigger: Trigger::Keysym(CLOSE_KEYSYM),
-                    modifiers: Modifiers::COMPOSITOR,
-                },
-                press_action: None,
-                release_action: Some(Action::CloseWindow),
-                repeat: true,
-                cooldown: None,
-                allow_when_locked: false,
-                allow_inhibiting: true,
-                allow_invalidation: true,
-                hotkey_overlay_title: None,
-            },
-        ]);
+            press_action: Some(Action::CloseWindow),
+            release_action: Some(Action::CenterColumn),
+            repeat: false,
+            cooldown: None,
+            allow_when_locked: false,
+            allow_inhibiting: true,
+            hotkey_overlay_title: None,
+        }]);
 
-        let mut common_state = create_test_state();
+        let mut state = create_test_state();
+
+        // Press Q with Mod held.
+        let mods = ModifiersState {
+            logo: true,
+            ..Default::default()
+        };
+        let filter = process_close_key(&mut state, &bindings, mods, true);
+        assert_matches!(
+            filter,
+            ShouldInterceptResult::InterceptAndHandle(Bind {
+                press_action: Some(Action::CloseWindow),
+                ..
+            })
+        );
+        assert!(state.suppressed_keys.contains(&CLOSE_KEY_CODE));
+
+        // Release Q with extra modifiers held: the release action must still fire.
+        let mods = ModifiersState {
+            logo: true,
+            ctrl: true,
+            shift: true,
+            ..Default::default()
+        };
+        let filter = process_close_key(&mut state, &bindings, mods, false);
+        assert_matches!(
+            filter,
+            ShouldInterceptResult::InterceptAndHandle(Bind {
+                release_action: Some(Action::CenterColumn),
+                ..
+            })
+        );
+        assert!(state.suppressed_keys.is_empty());
+
+        // Press Q with Mod held, then release Mod before Q: the release action must still fire.
+        let mods = ModifiersState {
+            logo: true,
+            ..Default::default()
+        };
+        let filter = process_close_key(&mut state, &bindings, mods, true);
+        assert_matches!(filter, ShouldInterceptResult::InterceptAndHandle(_));
+
+        let filter = process_close_key(&mut state, &bindings, ModifiersState::default(), false);
+        assert_matches!(
+            filter,
+            ShouldInterceptResult::InterceptAndHandle(Bind {
+                release_action: Some(Action::CenterColumn),
+                ..
+            })
+        );
+        assert!(state.suppressed_keys.is_empty());
+    }
+
+    #[test]
+    fn press_and_release_bind_release_after_other_input() {
+        // Push-to-talk: the release action must fire even if other keys were pressed or released
+        // in between.
+        let bindings = Binds(vec![Bind {
+            key: Key {
+                trigger: Trigger::Keysym(CLOSE_KEYSYM),
+                modifiers: Modifiers::COMPOSITOR,
+            },
+            press_action: Some(Action::CloseWindow),
+            release_action: Some(Action::CenterColumn),
+            repeat: false,
+            cooldown: None,
+            allow_when_locked: false,
+            allow_inhibiting: true,
+            hotkey_overlay_title: None,
+        }]);
+
+        let mut state = create_test_state();
+
+        // Press Q with Mod held.
+        let mods = ModifiersState {
+            logo: true,
+            ..Default::default()
+        };
+        let filter = process_close_key(&mut state, &bindings, mods, true);
+        assert_matches!(filter, ShouldInterceptResult::InterceptAndHandle(_));
+
+        // Press and release some other key in between.
+        let filter = process_none_key(&mut state, &bindings, mods, true);
+        assert_matches!(filter, ShouldInterceptResult::Forward);
+
+        let filter = process_none_key(&mut state, &bindings, mods, false);
+        assert_matches!(filter, ShouldInterceptResult::Forward);
+
+        // Release Q: the release action must still fire.
+        let filter = process_close_key(&mut state, &bindings, mods, false);
+        assert_matches!(
+            filter,
+            ShouldInterceptResult::InterceptAndHandle(Bind {
+                release_action: Some(Action::CenterColumn),
+                ..
+            })
+        );
+        assert!(state.suppressed_keys.is_empty());
+    }
+
+    #[test]
+    fn press_and_release_bind_no_release_without_press() {
+        let bindings = Binds(vec![Bind {
+            key: Key {
+                trigger: Trigger::Keysym(CLOSE_KEYSYM),
+                modifiers: Modifiers::COMPOSITOR,
+            },
+            press_action: Some(Action::CloseWindow),
+            release_action: Some(Action::CenterColumn),
+            repeat: false,
+            cooldown: None,
+            allow_when_locked: false,
+            allow_inhibiting: true,
+            hotkey_overlay_title: None,
+        }]);
+
+        let mut state = create_test_state();
+
+        // Press Q without the bind modifiers: forwarded to clients.
+        let filter = process_close_key(&mut state, &bindings, ModifiersState::default(), true);
+        assert_matches!(filter, ShouldInterceptResult::Forward);
+
+        // Hold Mod and release Q: the release action must not fire, since the press action
+        // didn't fire.
+        let mods = ModifiersState {
+            logo: true,
+            ..Default::default()
+        };
+        let filter = process_close_key(&mut state, &bindings, mods, false);
+        assert_matches!(filter, ShouldInterceptResult::Forward);
+        assert!(state.suppressed_keys.is_empty());
+        assert!(state.pending_release_binds.is_empty());
+    }
+
+    #[test]
+    fn press_and_release_bind_on_mod_key() {
+        let bindings = Binds(vec![Bind {
+            key: Key {
+                trigger: Trigger::CompositorMod,
+                modifiers: Modifiers::empty(),
+            },
+            press_action: Some(Action::CloseWindow),
+            release_action: Some(Action::CenterColumn),
+            repeat: false,
+            cooldown: None,
+            allow_when_locked: false,
+            allow_inhibiting: true,
+            hotkey_overlay_title: None,
+        }]);
+
+        let mut state = create_test_state();
         let mut mods: ModifiersState = Default::default();
 
-        // The mod bind should still trigger because it can't be invalidated
-        let result = process_mod_key(&mut common_state, &bindings, &mut mods, true);
-        assert_matches!(result, ShouldInterceptResult::Forward);
-
-        let result = process_close_key(&mut common_state, &bindings, mods, true);
-        assert_matches!(result, ShouldInterceptResult::InterceptOnly);
-
-        let result = process_mod_key(&mut common_state, &bindings, &mut mods, false);
+        // Press Mod: forwarded to clients, but the press action fires.
+        let filter = process_mod_key(&mut state, &bindings, &mut mods, true);
         assert_matches!(
-            result,
+            filter,
             ShouldInterceptResult::ForwardAndHandle(Bind {
-                release_action: Some(Action::ToggleOverview),
+                press_action: Some(Action::CloseWindow),
                 ..
             })
         );
+        assert!(state.suppressed_keys.is_empty());
 
-        let result = process_close_key(&mut common_state, &bindings, mods, false);
-        assert_matches!(result, ShouldInterceptResult::InterceptOnly);
+        // Press some other key in between.
+        let filter = process_none_key(&mut state, &bindings, mods, true);
+        assert_matches!(filter, ShouldInterceptResult::Forward);
 
-        // Both should fire
-        let result = process_mod_key(&mut common_state, &bindings, &mut mods, true);
-        assert_matches!(result, ShouldInterceptResult::Forward);
-
-        let result = process_close_key(&mut common_state, &bindings, mods, true);
-        assert_matches!(result, ShouldInterceptResult::InterceptOnly);
-
-        let result = process_close_key(&mut common_state, &bindings, mods, false);
+        // Release Mod with an extra modifier held: the release action must still fire.
+        mods.shift = true;
+        let filter = process_mod_key(&mut state, &bindings, &mut mods, false);
         assert_matches!(
-            result,
-            ShouldInterceptResult::InterceptAndHandle(Bind {
-                release_action: Some(Action::CloseWindow),
-                ..
-            })
-        );
-
-        let result = process_mod_key(&mut common_state, &bindings, &mut mods, false);
-        assert_matches!(
-            result,
+            filter,
             ShouldInterceptResult::ForwardAndHandle(Bind {
-                release_action: Some(Action::ToggleOverview),
+                release_action: Some(Action::CenterColumn),
                 ..
             })
         );
+        assert!(state.suppressed_keys.is_empty());
     }
 
     #[test]
@@ -6106,7 +6172,6 @@ mod tests {
             cooldown: None,
             allow_when_locked: false,
             allow_inhibiting: true,
-            allow_invalidation: true,
             hotkey_overlay_title: None,
         }]);
 
@@ -6154,7 +6219,6 @@ mod tests {
             cooldown: None,
             allow_when_locked: false,
             allow_inhibiting: false, // This binding cannot be inhibited
-            allow_invalidation: true,
             hotkey_overlay_title: None,
         }]);
 
@@ -6200,7 +6264,6 @@ mod tests {
                 cooldown: None,
                 allow_when_locked: false,
                 allow_inhibiting: true,
-                allow_invalidation: true,
                 hotkey_overlay_title: None,
             },
             Bind {
@@ -6214,7 +6277,6 @@ mod tests {
                 cooldown: None,
                 allow_when_locked: false,
                 allow_inhibiting: true,
-                allow_invalidation: true,
                 hotkey_overlay_title: None,
             },
             Bind {
@@ -6228,7 +6290,6 @@ mod tests {
                 cooldown: None,
                 allow_when_locked: false,
                 allow_inhibiting: true,
-                allow_invalidation: true,
                 hotkey_overlay_title: None,
             },
             Bind {
@@ -6242,7 +6303,6 @@ mod tests {
                 cooldown: None,
                 allow_when_locked: false,
                 allow_inhibiting: true,
-                allow_invalidation: true,
                 hotkey_overlay_title: None,
             },
             Bind {
@@ -6256,7 +6316,6 @@ mod tests {
                 cooldown: None,
                 allow_when_locked: false,
                 allow_inhibiting: true,
-                allow_invalidation: true,
                 hotkey_overlay_title: None,
             },
             Bind {
@@ -6270,7 +6329,6 @@ mod tests {
                 cooldown: None,
                 allow_when_locked: false,
                 allow_inhibiting: true,
-                allow_invalidation: true,
                 hotkey_overlay_title: None,
             },
         ]);
@@ -6453,7 +6511,6 @@ mod tests {
             cooldown: None,
             allow_when_locked: false,
             allow_inhibiting: true,
-            allow_invalidation: true,
             hotkey_overlay_title: None,
         }]);
 
@@ -6502,7 +6559,6 @@ mod tests {
             cooldown: None,
             allow_when_locked: false,
             allow_inhibiting: true,
-            allow_invalidation: true,
             hotkey_overlay_title: None,
         }]);
 
@@ -6528,7 +6584,6 @@ mod tests {
             cooldown: None,
             allow_when_locked: false,
             allow_inhibiting: true,
-            allow_invalidation: true,
             hotkey_overlay_title: None,
         }]);
 
@@ -6565,7 +6620,7 @@ mod tests {
     }
 
     #[test]
-    fn allow_invalidation_false_with_extra_modifiers() {
+    fn release_bind_on_modifier_key_fires_regardless_of_modifiers() {
         let bindings = Binds(vec![Bind {
             key: Key {
                 trigger: Trigger::Keysym(CTRL_KEYSYM),
@@ -6577,13 +6632,13 @@ mod tests {
             cooldown: None,
             allow_when_locked: false,
             allow_inhibiting: true,
-            allow_invalidation: false,
             hotkey_overlay_title: None,
         }]);
 
         let mut state = create_test_state();
 
-        // Press Control_L with the mod key held.
+        // Press Control_L with the mod key held: the press is forwarded so that clients see the
+        // modifier state, but the release action is armed.
         let mods = ModifiersState {
             logo: true,
             ctrl: true,
@@ -6592,31 +6647,7 @@ mod tests {
         let filter = process_ctrl_key(&mut state, &bindings, mods, true);
         assert_matches!(filter, ShouldInterceptResult::Forward);
 
-        // Press a second modifier key, invalidating the release.
-        let mods = ModifiersState {
-            logo: true,
-            ctrl: true,
-            shift: true,
-            ..Default::default()
-        };
-        let filter = should_intercept_key(
-            &mut state.suppressed_keys,
-            &bindings.0,
-            ModKey::Super,
-            SHIFT_KEY_CODE,
-            SHIFT_KEYSYM,
-            Some(SHIFT_KEYSYM),
-            true,
-            mods,
-            &state.screenshot_ui,
-            state.disable_power_key_handling,
-            state.is_inhibiting,
-            &mut state.valid_release_trigger,
-        );
-        assert_matches!(filter, ShouldInterceptResult::Forward);
-
-        // Release Control_L with the second modifier still held: the release action must still
-        // fire thanks to allow-invalidation=false.
+        // Release Control_L with extra modifiers held: the release action must still fire.
         let mods = ModifiersState {
             logo: true,
             shift: true,
@@ -6630,10 +6661,11 @@ mod tests {
                 ..
             })
         );
+        assert!(state.suppressed_keys.is_empty());
     }
 
     #[test]
-    fn allow_invalidation_false_with_extra_modifiers_regular_trigger() {
+    fn release_bind_requires_matching_modifiers_on_press() {
         let bindings = Binds(vec![Bind {
             key: Key {
                 trigger: Trigger::Keysym(CLOSE_KEYSYM),
@@ -6645,148 +6677,30 @@ mod tests {
             cooldown: None,
             allow_when_locked: false,
             allow_inhibiting: true,
-            allow_invalidation: false,
             hotkey_overlay_title: None,
         }]);
 
         let mut state = create_test_state();
 
-        // Press Q with Mod+Ctrl held.
+        // Press Q with only Ctrl held: the bind modifiers don't match, so the key is forwarded
+        // and the release action is not armed.
         let mods = ModifiersState {
-            logo: true,
             ctrl: true,
             ..Default::default()
         };
         let filter = process_close_key(&mut state, &bindings, mods, true);
-        assert_matches!(filter, ShouldInterceptResult::InterceptOnly);
-        assert!(state.suppressed_keys.contains(&CLOSE_KEY_CODE));
-
-        // Press a second modifier key, invalidating the release.
-        let mods = ModifiersState {
-            logo: true,
-            ctrl: true,
-            shift: true,
-            ..Default::default()
-        };
-        let filter = should_intercept_key(
-            &mut state.suppressed_keys,
-            &bindings.0,
-            ModKey::Super,
-            SHIFT_KEY_CODE,
-            SHIFT_KEYSYM,
-            Some(SHIFT_KEYSYM),
-            true,
-            mods,
-            &state.screenshot_ui,
-            state.disable_power_key_handling,
-            state.is_inhibiting,
-            &mut state.valid_release_trigger,
-        );
         assert_matches!(filter, ShouldInterceptResult::Forward);
 
-        // Release Q with the second modifier still held: the release action must still fire.
-        let mods = ModifiersState {
-            logo: true,
-            ctrl: true,
-            shift: true,
-            ..Default::default()
-        };
+        // Hold Mod while the key is held.
+        let mut mods: ModifiersState = Default::default();
+        let filter = process_mod_key(&mut state, &bindings, &mut mods, true);
+        assert_matches!(filter, ShouldInterceptResult::Forward);
+
+        // Release Q with Mod held: the release action must not fire, because Mod was not held
+        // when the key was originally pressed.
         let filter = process_close_key(&mut state, &bindings, mods, false);
-        assert_matches!(
-            filter,
-            ShouldInterceptResult::InterceptAndHandle(Bind {
-                release_action: Some(Action::CloseWindow),
-                ..
-            })
-        );
+        assert_matches!(filter, ShouldInterceptResult::Forward);
         assert!(state.suppressed_keys.is_empty());
-    }
-
-    #[test]
-    fn allow_invalidation_true_ignores_extra_modifiers() {
-        let bindings = Binds(vec![Bind {
-            key: Key {
-                trigger: Trigger::Keysym(CTRL_KEYSYM),
-                modifiers: Modifiers::COMPOSITOR,
-            },
-            press_action: None,
-            release_action: Some(Action::CloseWindow),
-            repeat: false,
-            cooldown: None,
-            allow_when_locked: false,
-            allow_inhibiting: true,
-            allow_invalidation: true,
-            hotkey_overlay_title: None,
-        }]);
-
-        let mut state = create_test_state();
-
-        // Press Control_L with the mod key held.
-        let mods = ModifiersState {
-            logo: true,
-            ctrl: true,
-            ..Default::default()
-        };
-        let filter = process_ctrl_key(&mut state, &bindings, mods, true);
-        assert_matches!(filter, ShouldInterceptResult::Forward);
-
-        // Release Control_L with an extra modifier held: no match, nothing to handle.
-        let mods = ModifiersState {
-            logo: true,
-            shift: true,
-            ..Default::default()
-        };
-        let filter = process_ctrl_key(&mut state, &bindings, mods, false);
-        assert_matches!(filter, ShouldInterceptResult::Forward);
-    }
-
-    #[test]
-    fn exact_match_beats_relaxed_fallback() {
-        let bindings = Binds(vec![
-            Bind {
-                key: Key {
-                    trigger: Trigger::Keysym(CLOSE_KEYSYM),
-                    modifiers: Modifiers::COMPOSITOR,
-                },
-                press_action: None,
-                release_action: Some(Action::CloseWindow),
-                repeat: false,
-                cooldown: None,
-                allow_when_locked: false,
-                allow_inhibiting: true,
-                allow_invalidation: false,
-                hotkey_overlay_title: None,
-            },
-            Bind {
-                key: Key {
-                    trigger: Trigger::Keysym(CLOSE_KEYSYM),
-                    modifiers: Modifiers::COMPOSITOR | Modifiers::CTRL,
-                },
-                press_action: None,
-                release_action: Some(Action::ToggleOverview),
-                repeat: false,
-                cooldown: None,
-                allow_when_locked: false,
-                allow_inhibiting: true,
-                allow_invalidation: true,
-                hotkey_overlay_title: None,
-            },
-        ]);
-
-        // With Mod+Ctrl held, the exact `Mod+Ctrl+Q` match must win over the relaxed
-        // `Mod+Q` fallback, even though the latter comes first in the config.
-        let matched = find_configured_bind(
-            &bindings.0,
-            ModKey::Super,
-            Trigger::Keysym(CLOSE_KEYSYM),
-            ModifiersState {
-                logo: true,
-                ctrl: true,
-                ..Default::default()
-            },
-            false,
-        )
-        .unwrap();
-        assert_eq!(matched.release_action, Some(Action::ToggleOverview));
+        assert!(state.pending_release_binds.is_empty());
     }
 }
