@@ -7,8 +7,8 @@ use std::time::Duration;
 
 use anyhow::ensure;
 use niri_config::{
-    Action, Bind, Color, Config, CornerRadius, GradientInterpolation, Key, Modifiers, MruDirection,
-    MruFilter, MruScope, Trigger,
+    Action, Bind, BoundAction, Color, Config, CornerRadius, GradientInterpolation, Key, Modifiers,
+    MruDirection, MruFilter, MruScope, Trigger,
 };
 use pango::FontDescription;
 use pangocairo::cairo::{self, ImageSurface};
@@ -1834,8 +1834,7 @@ fn make_preset_opened_binds() -> Vec<Bind> {
                 // The modifier is filled dynamically.
                 modifiers: Modifiers::empty(),
             },
-            press_action: Some(action),
-            release_action: None,
+            action: BoundAction::Press(action),
             repeat: true,
             cooldown: None,
             allow_when_locked: false,
@@ -1883,7 +1882,7 @@ fn make_dynamic_opened_binds(config: &Config) -> Vec<Bind> {
     let mut binds: HashMap<Trigger, Vec<Bind>> = HashMap::new();
 
     for bind in &config.binds.0 {
-        let Some(press_action) = &bind.press_action else {
+        let Some(press_action) = bind.press_action() else {
             continue;
         };
 
@@ -1912,8 +1911,7 @@ fn make_dynamic_opened_binds(config: &Config) -> Vec<Bind> {
         };
 
         binds.entry(bind.key.trigger).or_default().push(Bind {
-            press_action: Some(action),
-            release_action: None,
+            action: BoundAction::Press(action),
             ..bind.clone()
         });
     }

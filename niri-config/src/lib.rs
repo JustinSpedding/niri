@@ -730,6 +730,48 @@ mod tests {
     }
 
     #[test]
+    fn parse_bind_bound_action() {
+        let config = do_parse(
+            r#"
+            binds {
+                Mod+A { close-window; }
+                Mod+B {
+                    press { close-window; }
+                }
+                Mod+C {
+                    release { toggle-overview; }
+                }
+                Mod+D {
+                    press { close-window; }
+                    release { toggle-overview; }
+                }
+            }
+            "#,
+        );
+
+        let action = |index: usize| &config.binds.0[index].action;
+
+        // A direct action and a press section both bind only the press phase.
+        assert!(matches!(action(0), BoundAction::Press(Action::CloseWindow)));
+        assert!(matches!(action(1), BoundAction::Press(Action::CloseWindow)));
+
+        // A release section binds only the release phase.
+        assert!(matches!(
+            action(2),
+            BoundAction::Release(Action::ToggleOverview)
+        ));
+
+        // Both sections bind both phases.
+        assert!(matches!(
+            action(3),
+            BoundAction::Both {
+                press: Action::CloseWindow,
+                release: Action::ToggleOverview,
+            }
+        ));
+    }
+
+    #[test]
     fn parse_on_xdg_activate() {
         let parsed = do_parse(
             r#"
@@ -2070,10 +2112,9 @@ mod tests {
                                 COMPOSITOR,
                             ),
                         },
-                        press_action: Some(
+                        action: Press(
                             ToggleKeyboardShortcutsInhibit,
                         ),
-                        release_action: None,
                         repeat: true,
                         cooldown: None,
                         allow_when_locked: false,
@@ -2093,10 +2134,9 @@ mod tests {
                                 SHIFT | COMPOSITOR,
                             ),
                         },
-                        press_action: Some(
+                        action: Press(
                             ToggleKeyboardShortcutsInhibit,
                         ),
-                        release_action: None,
                         repeat: true,
                         cooldown: None,
                         allow_when_locked: false,
@@ -2112,14 +2152,13 @@ mod tests {
                                 COMPOSITOR,
                             ),
                         },
-                        press_action: Some(
+                        action: Press(
                             Spawn(
                                 [
                                     "alacritty",
                                 ],
                             ),
                         ),
-                        release_action: None,
                         repeat: true,
                         cooldown: None,
                         allow_when_locked: true,
@@ -2135,10 +2174,9 @@ mod tests {
                                 COMPOSITOR,
                             ),
                         },
-                        press_action: Some(
+                        action: Press(
                             CloseWindow,
                         ),
-                        release_action: None,
                         repeat: true,
                         cooldown: None,
                         allow_when_locked: false,
@@ -2156,10 +2194,9 @@ mod tests {
                                 SHIFT | COMPOSITOR,
                             ),
                         },
-                        press_action: Some(
+                        action: Press(
                             FocusMonitorLeft,
                         ),
-                        release_action: None,
                         repeat: true,
                         cooldown: None,
                         allow_when_locked: false,
@@ -2175,12 +2212,11 @@ mod tests {
                                 SHIFT | COMPOSITOR,
                             ),
                         },
-                        press_action: Some(
+                        action: Press(
                             FocusMonitor(
                                 "eDP-1",
                             ),
                         ),
-                        release_action: None,
                         repeat: true,
                         cooldown: None,
                         allow_when_locked: false,
@@ -2196,10 +2232,9 @@ mod tests {
                                 CTRL | SHIFT | COMPOSITOR,
                             ),
                         },
-                        press_action: Some(
+                        action: Press(
                             MoveWindowToMonitorRight,
                         ),
-                        release_action: None,
                         repeat: true,
                         cooldown: None,
                         allow_when_locked: false,
@@ -2215,12 +2250,11 @@ mod tests {
                                 CTRL | ALT | COMPOSITOR,
                             ),
                         },
-                        press_action: Some(
+                        action: Press(
                             MoveWindowToMonitor(
                                 "eDP-1",
                             ),
                         ),
-                        release_action: None,
                         repeat: true,
                         cooldown: None,
                         allow_when_locked: false,
@@ -2236,12 +2270,11 @@ mod tests {
                                 CTRL | ALT | COMPOSITOR,
                             ),
                         },
-                        press_action: Some(
+                        action: Press(
                             MoveColumnToMonitor(
                                 "DP-1",
                             ),
                         ),
-                        release_action: None,
                         repeat: true,
                         cooldown: None,
                         allow_when_locked: false,
@@ -2257,10 +2290,9 @@ mod tests {
                                 COMPOSITOR,
                             ),
                         },
-                        press_action: Some(
+                        action: Press(
                             ConsumeWindowIntoColumn,
                         ),
-                        release_action: None,
                         repeat: true,
                         cooldown: None,
                         allow_when_locked: false,
@@ -2276,14 +2308,13 @@ mod tests {
                                 COMPOSITOR,
                             ),
                         },
-                        press_action: Some(
+                        action: Press(
                             FocusWorkspace(
                                 Index(
                                     1,
                                 ),
                             ),
                         ),
-                        release_action: None,
                         repeat: true,
                         cooldown: None,
                         allow_when_locked: false,
@@ -2299,14 +2330,13 @@ mod tests {
                                 SHIFT | COMPOSITOR,
                             ),
                         },
-                        press_action: Some(
+                        action: Press(
                             FocusWorkspace(
                                 Name(
                                     "workspace-1",
                                 ),
                             ),
                         ),
-                        release_action: None,
                         repeat: true,
                         cooldown: None,
                         allow_when_locked: false,
@@ -2322,12 +2352,11 @@ mod tests {
                                 SHIFT | COMPOSITOR,
                             ),
                         },
-                        press_action: Some(
+                        action: Press(
                             Quit(
                                 true,
                             ),
                         ),
-                        release_action: None,
                         repeat: true,
                         cooldown: None,
                         allow_when_locked: false,
@@ -2341,10 +2370,9 @@ mod tests {
                                 COMPOSITOR,
                             ),
                         },
-                        press_action: Some(
+                        action: Press(
                             FocusWorkspaceDown,
                         ),
-                        release_action: None,
                         repeat: true,
                         cooldown: Some(
                             150ms,
@@ -2362,12 +2390,11 @@ mod tests {
                                 ALT | SUPER,
                             ),
                         },
-                        press_action: Some(
+                        action: Press(
                             SpawnSh(
                                 "pkill orca || exec orca",
                             ),
                         ),
-                        release_action: None,
                         repeat: true,
                         cooldown: None,
                         allow_when_locked: true,
@@ -2381,8 +2408,7 @@ mod tests {
                                 0x0,
                             ),
                         },
-                        press_action: None,
-                        release_action: Some(
+                        action: Release(
                             ToggleOverview,
                         ),
                         repeat: false,
@@ -2398,8 +2424,7 @@ mod tests {
                                 SHIFT,
                             ),
                         },
-                        press_action: None,
-                        release_action: Some(
+                        action: Release(
                             ToggleWindowFloating,
                         ),
                         repeat: false,
@@ -2519,7 +2544,7 @@ mod tests {
                                 ALT,
                             ),
                         },
-                        press_action: Some(
+                        action: Press(
                             MruAdvance {
                                 direction: Forward,
                                 scope: None,
@@ -2528,7 +2553,6 @@ mod tests {
                                 ),
                             },
                         ),
-                        release_action: None,
                         repeat: true,
                         cooldown: None,
                         allow_when_locked: false,
@@ -2544,7 +2568,7 @@ mod tests {
                                 ALT,
                             ),
                         },
-                        press_action: Some(
+                        action: Press(
                             MruAdvance {
                                 direction: Forward,
                                 scope: None,
@@ -2553,7 +2577,6 @@ mod tests {
                                 ),
                             },
                         ),
-                        release_action: None,
                         repeat: true,
                         cooldown: None,
                         allow_when_locked: false,
@@ -2569,7 +2592,7 @@ mod tests {
                                 SUPER,
                             ),
                         },
-                        press_action: Some(
+                        action: Press(
                             MruAdvance {
                                 direction: Forward,
                                 scope: Some(
@@ -2580,7 +2603,6 @@ mod tests {
                                 ),
                             },
                         ),
-                        release_action: None,
                         repeat: true,
                         cooldown: None,
                         allow_when_locked: false,

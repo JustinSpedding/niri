@@ -6,7 +6,8 @@ use std::time::Duration;
 use calloop::timer::{TimeoutAction, Timer};
 use input::event::gesture::GestureEventCoordinates as _;
 use niri_config::{
-    Action, Bind, Binds, Config, Key, ModKey, Modifiers, MruDirection, SwitchBinds, Trigger,
+    Action, Bind, Binds, BoundAction, Config, Key, ModKey, Modifiers, MruDirection, SwitchBinds,
+    Trigger,
 };
 use niri_ipc::LayoutSwitchTarget;
 use smithay::backend::input::{
@@ -696,9 +697,7 @@ impl State {
     }
 
     pub fn handle_bind(&mut self, bind: Bind, pressed: bool) {
-        let Some(action) = bind.action_for(pressed).cloned() else {
-            return;
-        };
+        let action = bind.action_for(pressed).clone();
 
         let Some(cooldown) = bind.cooldown else {
             self.do_action(action, bind.allow_when_locked);
@@ -3219,8 +3218,7 @@ impl State {
                                     trigger: Trigger::WheelScrollLeft,
                                     modifiers: Modifiers::empty(),
                                 },
-                                press_action: Some(Action::FocusColumnLeftUnderMouse),
-                                release_action: None,
+                                action: BoundAction::Press(Action::FocusColumnLeftUnderMouse),
                                 repeat: true,
                                 cooldown: None,
                                 allow_when_locked: false,
@@ -3232,8 +3230,7 @@ impl State {
                                     trigger: Trigger::WheelScrollRight,
                                     modifiers: Modifiers::empty(),
                                 },
-                                press_action: Some(Action::FocusColumnRightUnderMouse),
-                                release_action: None,
+                                action: BoundAction::Press(Action::FocusColumnRightUnderMouse),
                                 repeat: true,
                                 cooldown: None,
                                 allow_when_locked: false,
@@ -3254,7 +3251,7 @@ impl State {
                             )
                             .filter(|bind| {
                                 !self.niri.screenshot_ui.is_open()
-                                    || allowed_during_screenshot(bind.press_action.as_ref())
+                                    || allowed_during_screenshot(bind.action_for(bind.has_press()))
                             });
                             let bind_right = find_configured_bind(
                                 bindings,
@@ -3265,7 +3262,7 @@ impl State {
                             )
                             .filter(|bind| {
                                 !self.niri.screenshot_ui.is_open()
-                                    || allowed_during_screenshot(bind.press_action.as_ref())
+                                    || allowed_during_screenshot(bind.action_for(bind.has_press()))
                             });
                             (bind_left, bind_right)
                         };
@@ -3292,8 +3289,7 @@ impl State {
                                 trigger: Trigger::WheelScrollUp,
                                 modifiers: Modifiers::empty(),
                             },
-                            press_action: Some(Action::FocusWorkspaceUpUnderMouse),
-                            release_action: None,
+                            action: BoundAction::Press(Action::FocusWorkspaceUpUnderMouse),
                             repeat: true,
                             cooldown: Some(Duration::from_millis(50)),
                             allow_when_locked: false,
@@ -3305,8 +3301,7 @@ impl State {
                                 trigger: Trigger::WheelScrollDown,
                                 modifiers: Modifiers::empty(),
                             },
-                            press_action: Some(Action::FocusWorkspaceDownUnderMouse),
-                            release_action: None,
+                            action: BoundAction::Press(Action::FocusWorkspaceDownUnderMouse),
                             repeat: true,
                             cooldown: Some(Duration::from_millis(50)),
                             allow_when_locked: false,
@@ -3320,8 +3315,7 @@ impl State {
                                 trigger: Trigger::WheelScrollUp,
                                 modifiers: Modifiers::empty(),
                             },
-                            press_action: Some(Action::FocusColumnLeftUnderMouse),
-                            release_action: None,
+                            action: BoundAction::Press(Action::FocusColumnLeftUnderMouse),
                             repeat: true,
                             cooldown: Some(Duration::from_millis(50)),
                             allow_when_locked: false,
@@ -3333,8 +3327,7 @@ impl State {
                                 trigger: Trigger::WheelScrollDown,
                                 modifiers: Modifiers::empty(),
                             },
-                            press_action: Some(Action::FocusColumnRightUnderMouse),
-                            release_action: None,
+                            action: BoundAction::Press(Action::FocusColumnRightUnderMouse),
                             repeat: true,
                             cooldown: Some(Duration::from_millis(50)),
                             allow_when_locked: false,
@@ -3355,7 +3348,7 @@ impl State {
                         )
                         .filter(|bind| {
                             !self.niri.screenshot_ui.is_open()
-                                || allowed_during_screenshot(bind.press_action.as_ref())
+                                || allowed_during_screenshot(bind.action_for(bind.has_press()))
                         });
                         let bind_down = find_configured_bind(
                             bindings,
@@ -3366,7 +3359,7 @@ impl State {
                         )
                         .filter(|bind| {
                             !self.niri.screenshot_ui.is_open()
-                                || allowed_during_screenshot(bind.press_action.as_ref())
+                                || allowed_during_screenshot(bind.action_for(bind.has_press()))
                         });
                         (bind_up, bind_down)
                     };
@@ -3514,7 +3507,7 @@ impl State {
                     )
                     .filter(|bind| {
                         !self.niri.screenshot_ui.is_open()
-                            || allowed_during_screenshot(bind.press_action.as_ref())
+                            || allowed_during_screenshot(bind.action_for(bind.has_press()))
                     });
                     let bind_right = find_configured_bind(
                         bindings,
@@ -3525,7 +3518,7 @@ impl State {
                     )
                     .filter(|bind| {
                         !self.niri.screenshot_ui.is_open()
-                            || allowed_during_screenshot(bind.press_action.as_ref())
+                            || allowed_during_screenshot(bind.action_for(bind.has_press()))
                     });
                     drop(config);
 
@@ -3558,7 +3551,7 @@ impl State {
                     )
                     .filter(|bind| {
                         !self.niri.screenshot_ui.is_open()
-                            || allowed_during_screenshot(bind.press_action.as_ref())
+                            || allowed_during_screenshot(bind.action_for(bind.has_press()))
                     });
                     let bind_down = find_configured_bind(
                         bindings,
@@ -3569,7 +3562,7 @@ impl State {
                     )
                     .filter(|bind| {
                         !self.niri.screenshot_ui.is_open()
-                            || allowed_during_screenshot(bind.press_action.as_ref())
+                            || allowed_during_screenshot(bind.action_for(bind.has_press()))
                     });
                     drop(config);
 
@@ -4649,10 +4642,8 @@ fn should_intercept_key<'a>(
         let mut use_screenshot_ui_action = true;
 
         if let Some(bind) = &final_bind {
-            if let Some(action) = bind.action_for(pressed) {
-                if allowed_during_screenshot(Some(action)) {
-                    use_screenshot_ui_action = false;
-                }
+            if allowed_during_screenshot(bind.action_for(pressed)) {
+                use_screenshot_ui_action = false;
             }
         }
 
@@ -4664,8 +4655,7 @@ fn should_intercept_key<'a>(
                         // Not entirely correct but it doesn't matter in how we currently use it.
                         modifiers: Modifiers::empty(),
                     },
-                    press_action: Some(action),
-                    release_action: None,
+                    action: BoundAction::Press(action),
                     repeat: true,
                     cooldown: None,
                     allow_when_locked: false,
@@ -4745,8 +4735,7 @@ fn find_bind<'a>(
                 trigger: Trigger::Keysym(modified),
                 modifiers: Modifiers::empty(),
             },
-            press_action: Some(action),
-            release_action: None,
+            action: BoundAction::Press(action),
             repeat: true,
             cooldown: None,
             allow_when_locked: false,
@@ -4821,8 +4810,8 @@ fn find_configured_bind<'a>(
 
     // If there is an exact match, return it.
     for bind in bindings {
-        let is_press_bind = bind.press_action.is_some();
-        let is_release_bind = bind.release_action.is_some();
+        let is_press_bind = bind.has_press();
+        let is_release_bind = bind.has_release();
         if (pressed && !is_press_bind) || (!pressed && !is_release_bind) {
             continue;
         }
@@ -4993,11 +4982,10 @@ fn allowed_when_locked(action: &Action) -> bool {
     )
 }
 
-fn allowed_during_screenshot(action: Option<&Action>) -> bool {
+fn allowed_during_screenshot(action: &Action) -> bool {
     matches!(
         action,
-        Some(
-            Action::Quit(_)
+        Action::Quit(_)
             | Action::ChangeVt(_)
             | Action::Suspend
             | Action::PowerOffMonitors
@@ -5031,7 +5019,6 @@ fn allowed_during_screenshot(action: Option<&Action>) -> bool {
             | Action::SetWindowWidth(_)
             | Action::SetWindowHeight(_)
             | Action::SetColumnWidth(_)
-        )
     )
 }
 
@@ -5061,8 +5048,7 @@ fn hardcoded_overview_bind(raw: Keysym, mods: ModifiersState) -> Option<Bind> {
             trigger: Trigger::Keysym(raw),
             modifiers: Modifiers::empty(),
         },
-        press_action: Some(action),
-        release_action: None,
+        action: BoundAction::Press(action),
         repeat,
         cooldown: None,
         allow_when_locked: false,
@@ -5644,8 +5630,7 @@ mod tests {
                 trigger: Trigger::Keysym(CLOSE_KEYSYM),
                 modifiers: Modifiers::COMPOSITOR | Modifiers::CTRL,
             },
-            press_action: Some(Action::CloseWindow),
-            release_action: None,
+            action: BoundAction::Press(Action::CloseWindow),
             repeat: true,
             cooldown: None,
             allow_when_locked: false,
@@ -5665,7 +5650,7 @@ mod tests {
         assert_matches!(
             filter,
             ShouldInterceptResult::InterceptAndHandle(Bind {
-                press_action: Some(Action::CloseWindow),
+                action: BoundAction::Press(Action::CloseWindow),
                 ..
             })
         );
@@ -5699,7 +5684,7 @@ mod tests {
         assert_matches!(
             filter,
             ShouldInterceptResult::InterceptAndHandle(Bind {
-                press_action: Some(Action::CloseWindow),
+                action: BoundAction::Press(Action::CloseWindow),
                 ..
             })
         );
@@ -5719,7 +5704,7 @@ mod tests {
         assert_matches!(
             filter,
             ShouldInterceptResult::InterceptAndHandle(Bind {
-                press_action: Some(Action::CloseWindow),
+                action: BoundAction::Press(Action::CloseWindow),
                 ..
             })
         );
@@ -5765,7 +5750,7 @@ mod tests {
         assert_matches!(
             filter,
             ShouldInterceptResult::InterceptAndHandle(Bind {
-                press_action: Some(Action::CloseWindow),
+                action: BoundAction::Press(Action::CloseWindow),
                 ..
             })
         );
@@ -5786,8 +5771,7 @@ mod tests {
                     trigger: Trigger::CompositorMod,
                     modifiers: Modifiers::empty(),
                 },
-                press_action: None,
-                release_action: Some(Action::ToggleOverview),
+                action: BoundAction::Release(Action::ToggleOverview),
                 repeat: true,
                 cooldown: None,
                 allow_when_locked: false,
@@ -5800,8 +5784,7 @@ mod tests {
                     trigger: Trigger::Keysym(CLOSE_KEYSYM),
                     modifiers: Modifiers::COMPOSITOR,
                 },
-                press_action: None,
-                release_action: Some(Action::CloseWindow),
+                action: BoundAction::Release(Action::CloseWindow),
                 repeat: true,
                 cooldown: None,
                 allow_when_locked: false,
@@ -5814,8 +5797,7 @@ mod tests {
                     trigger: Trigger::Keysym(OTHER_KEYSYM),
                     modifiers: Modifiers::COMPOSITOR,
                 },
-                press_action: Some(Action::CenterColumn),
-                release_action: None,
+                action: BoundAction::Press(Action::CenterColumn),
                 repeat: true,
                 cooldown: None,
                 allow_when_locked: false,
@@ -5836,7 +5818,7 @@ mod tests {
         assert_matches!(
             result,
             ShouldInterceptResult::ForwardAndHandle(Bind {
-                release_action: Some(Action::ToggleOverview),
+                action: BoundAction::Release(Action::ToggleOverview),
                 ..
             })
         );
@@ -5854,7 +5836,7 @@ mod tests {
         assert_matches!(
             result,
             ShouldInterceptResult::ForwardAndHandle(Bind {
-                release_action: Some(Action::ToggleOverview),
+                action: BoundAction::Release(Action::ToggleOverview),
                 ..
             })
         );
@@ -5870,7 +5852,7 @@ mod tests {
         assert_matches!(
             result,
             ShouldInterceptResult::InterceptAndHandle(Bind {
-                press_action: Some(Action::CenterColumn),
+                action: BoundAction::Press(Action::CenterColumn),
                 ..
             })
         );
@@ -5879,7 +5861,7 @@ mod tests {
         assert_matches!(
             result,
             ShouldInterceptResult::ForwardAndHandle(Bind {
-                release_action: Some(Action::ToggleOverview),
+                action: BoundAction::Release(Action::ToggleOverview),
                 ..
             })
         );
@@ -5898,7 +5880,7 @@ mod tests {
         assert_matches!(
             result,
             ShouldInterceptResult::ForwardAndHandle(Bind {
-                release_action: Some(Action::ToggleOverview),
+                action: BoundAction::Release(Action::ToggleOverview),
                 ..
             })
         );
@@ -5907,7 +5889,7 @@ mod tests {
         assert_matches!(
             result,
             ShouldInterceptResult::InterceptAndHandle(Bind {
-                release_action: Some(Action::CloseWindow),
+                action: BoundAction::Release(Action::CloseWindow),
                 ..
             })
         );
@@ -5923,7 +5905,7 @@ mod tests {
         assert_matches!(
             result,
             ShouldInterceptResult::InterceptAndHandle(Bind {
-                release_action: Some(Action::CloseWindow),
+                action: BoundAction::Release(Action::CloseWindow),
                 ..
             })
         );
@@ -5932,7 +5914,7 @@ mod tests {
         assert_matches!(
             result,
             ShouldInterceptResult::ForwardAndHandle(Bind {
-                release_action: Some(Action::ToggleOverview),
+                action: BoundAction::Release(Action::ToggleOverview),
                 ..
             })
         );
@@ -5968,8 +5950,10 @@ mod tests {
                 trigger: Trigger::Keysym(CLOSE_KEYSYM),
                 modifiers: Modifiers::COMPOSITOR,
             },
-            press_action: Some(Action::CloseWindow),
-            release_action: Some(Action::CenterColumn),
+            action: BoundAction::Both {
+                press: Action::CloseWindow,
+                release: Action::CenterColumn,
+            },
             repeat: false,
             cooldown: None,
             allow_when_locked: false,
@@ -5988,7 +5972,10 @@ mod tests {
         assert_matches!(
             filter,
             ShouldInterceptResult::InterceptAndHandle(Bind {
-                press_action: Some(Action::CloseWindow),
+                action: BoundAction::Both {
+                    press: Action::CloseWindow,
+                    ..
+                },
                 ..
             })
         );
@@ -6005,7 +5992,10 @@ mod tests {
         assert_matches!(
             filter,
             ShouldInterceptResult::InterceptAndHandle(Bind {
-                release_action: Some(Action::CenterColumn),
+                action: BoundAction::Both {
+                    release: Action::CenterColumn,
+                    ..
+                },
                 ..
             })
         );
@@ -6023,7 +6013,10 @@ mod tests {
         assert_matches!(
             filter,
             ShouldInterceptResult::InterceptAndHandle(Bind {
-                release_action: Some(Action::CenterColumn),
+                action: BoundAction::Both {
+                    release: Action::CenterColumn,
+                    ..
+                },
                 ..
             })
         );
@@ -6039,8 +6032,10 @@ mod tests {
                 trigger: Trigger::Keysym(CLOSE_KEYSYM),
                 modifiers: Modifiers::COMPOSITOR,
             },
-            press_action: Some(Action::CloseWindow),
-            release_action: Some(Action::CenterColumn),
+            action: BoundAction::Both {
+                press: Action::CloseWindow,
+                release: Action::CenterColumn,
+            },
             repeat: false,
             cooldown: None,
             allow_when_locked: false,
@@ -6070,7 +6065,10 @@ mod tests {
         assert_matches!(
             filter,
             ShouldInterceptResult::InterceptAndHandle(Bind {
-                release_action: Some(Action::CenterColumn),
+                action: BoundAction::Both {
+                    release: Action::CenterColumn,
+                    ..
+                },
                 ..
             })
         );
@@ -6084,8 +6082,10 @@ mod tests {
                 trigger: Trigger::Keysym(CLOSE_KEYSYM),
                 modifiers: Modifiers::COMPOSITOR,
             },
-            press_action: Some(Action::CloseWindow),
-            release_action: Some(Action::CenterColumn),
+            action: BoundAction::Both {
+                press: Action::CloseWindow,
+                release: Action::CenterColumn,
+            },
             repeat: false,
             cooldown: None,
             allow_when_locked: false,
@@ -6118,8 +6118,10 @@ mod tests {
                 trigger: Trigger::CompositorMod,
                 modifiers: Modifiers::empty(),
             },
-            press_action: Some(Action::CloseWindow),
-            release_action: Some(Action::CenterColumn),
+            action: BoundAction::Both {
+                press: Action::CloseWindow,
+                release: Action::CenterColumn,
+            },
             repeat: false,
             cooldown: None,
             allow_when_locked: false,
@@ -6135,7 +6137,10 @@ mod tests {
         assert_matches!(
             filter,
             ShouldInterceptResult::ForwardAndHandle(Bind {
-                press_action: Some(Action::CloseWindow),
+                action: BoundAction::Both {
+                    press: Action::CloseWindow,
+                    ..
+                },
                 ..
             })
         );
@@ -6151,7 +6156,10 @@ mod tests {
         assert_matches!(
             filter,
             ShouldInterceptResult::ForwardAndHandle(Bind {
-                release_action: Some(Action::CenterColumn),
+                action: BoundAction::Both {
+                    release: Action::CenterColumn,
+                    ..
+                },
                 ..
             })
         );
@@ -6160,14 +6168,16 @@ mod tests {
 
     #[test]
     fn test_press_and_release_bindings() {
-        // Test binds that have both press_action and release_action
+        // Test binds that have both press and release actions
         let bindings = Binds(vec![Bind {
             key: Key {
                 trigger: Trigger::Keysym(CLOSE_KEYSYM),
                 modifiers: Modifiers::COMPOSITOR,
             },
-            press_action: Some(Action::CloseWindow),
-            release_action: Some(Action::CenterColumn),
+            action: BoundAction::Both {
+                press: Action::CloseWindow,
+                release: Action::CenterColumn,
+            },
             repeat: true,
             cooldown: None,
             allow_when_locked: false,
@@ -6186,8 +6196,10 @@ mod tests {
         assert_matches!(
             result,
             ShouldInterceptResult::InterceptAndHandle(Bind {
-                press_action: Some(Action::CloseWindow),
-                release_action: Some(Action::CenterColumn),
+                action: BoundAction::Both {
+                    press: Action::CloseWindow,
+                    release: Action::CenterColumn
+                },
                 ..
             })
         );
@@ -6198,8 +6210,10 @@ mod tests {
         assert_matches!(
             result,
             ShouldInterceptResult::InterceptAndHandle(Bind {
-                press_action: Some(Action::CloseWindow),
-                release_action: Some(Action::CenterColumn),
+                action: BoundAction::Both {
+                    press: Action::CloseWindow,
+                    release: Action::CenterColumn
+                },
                 ..
             })
         );
@@ -6213,8 +6227,7 @@ mod tests {
                 trigger: Trigger::Keysym(CLOSE_KEYSYM),
                 modifiers: Modifiers::COMPOSITOR | Modifiers::CTRL,
             },
-            press_action: Some(Action::CloseWindow),
-            release_action: None,
+            action: BoundAction::Press(Action::CloseWindow),
             repeat: true,
             cooldown: None,
             allow_when_locked: false,
@@ -6239,7 +6252,7 @@ mod tests {
         assert_matches!(
             filter,
             ShouldInterceptResult::InterceptAndHandle(Bind {
-                press_action: Some(Action::CloseWindow),
+                action: BoundAction::Press(Action::CloseWindow),
                 ..
             })
         );
@@ -6258,8 +6271,7 @@ mod tests {
                     trigger: Trigger::Keysym(Keysym::q),
                     modifiers: Modifiers::COMPOSITOR,
                 },
-                press_action: Some(Action::CloseWindow),
-                release_action: None,
+                action: BoundAction::Press(Action::CloseWindow),
                 repeat: true,
                 cooldown: None,
                 allow_when_locked: false,
@@ -6271,8 +6283,7 @@ mod tests {
                     trigger: Trigger::Keysym(Keysym::h),
                     modifiers: Modifiers::SUPER,
                 },
-                press_action: Some(Action::FocusColumnLeft),
-                release_action: None,
+                action: BoundAction::Press(Action::FocusColumnLeft),
                 repeat: true,
                 cooldown: None,
                 allow_when_locked: false,
@@ -6284,8 +6295,7 @@ mod tests {
                     trigger: Trigger::Keysym(Keysym::j),
                     modifiers: Modifiers::empty(),
                 },
-                press_action: Some(Action::FocusWindowDown),
-                release_action: None,
+                action: BoundAction::Press(Action::FocusWindowDown),
                 repeat: true,
                 cooldown: None,
                 allow_when_locked: false,
@@ -6297,8 +6307,7 @@ mod tests {
                     trigger: Trigger::Keysym(Keysym::k),
                     modifiers: Modifiers::COMPOSITOR | Modifiers::SUPER,
                 },
-                press_action: Some(Action::FocusWindowUp),
-                release_action: None,
+                action: BoundAction::Press(Action::FocusWindowUp),
                 repeat: true,
                 cooldown: None,
                 allow_when_locked: false,
@@ -6310,8 +6319,7 @@ mod tests {
                     trigger: Trigger::Keysym(Keysym::l),
                     modifiers: Modifiers::SUPER | Modifiers::ALT,
                 },
-                press_action: Some(Action::FocusColumnRight),
-                release_action: None,
+                action: BoundAction::Press(Action::FocusColumnRight),
                 repeat: true,
                 cooldown: None,
                 allow_when_locked: false,
@@ -6323,8 +6331,7 @@ mod tests {
                     trigger: Trigger::Keysym(Keysym::Super_L),
                     modifiers: Modifiers::empty(),
                 },
-                press_action: None,
-                release_action: Some(Action::ToggleOverview),
+                action: BoundAction::Release(Action::ToggleOverview),
                 repeat: false,
                 cooldown: None,
                 allow_when_locked: false,
@@ -6505,8 +6512,10 @@ mod tests {
                 trigger: Trigger::Keysym(CTRL_KEYSYM),
                 modifiers: Modifiers::COMPOSITOR,
             },
-            press_action: Some(Action::CloseWindow),
-            release_action: Some(Action::CloseWindow),
+            action: BoundAction::Both {
+                press: Action::CloseWindow,
+                release: Action::CloseWindow,
+            },
             repeat: false,
             cooldown: None,
             allow_when_locked: false,
@@ -6526,7 +6535,10 @@ mod tests {
         assert_matches!(
             filter,
             ShouldInterceptResult::ForwardAndHandle(Bind {
-                press_action: Some(Action::CloseWindow),
+                action: BoundAction::Both {
+                    press: Action::CloseWindow,
+                    ..
+                },
                 ..
             })
         );
@@ -6540,7 +6552,10 @@ mod tests {
         assert_matches!(
             filter,
             ShouldInterceptResult::ForwardAndHandle(Bind {
-                release_action: Some(Action::CloseWindow),
+                action: BoundAction::Both {
+                    release: Action::CloseWindow,
+                    ..
+                },
                 ..
             })
         );
@@ -6553,8 +6568,10 @@ mod tests {
                 trigger: Trigger::Keysym(CTRL_KEYSYM),
                 modifiers: Modifiers::COMPOSITOR,
             },
-            press_action: Some(Action::CloseWindow),
-            release_action: Some(Action::CloseWindow),
+            action: BoundAction::Both {
+                press: Action::CloseWindow,
+                release: Action::CloseWindow,
+            },
             repeat: false,
             cooldown: None,
             allow_when_locked: false,
@@ -6578,8 +6595,10 @@ mod tests {
                 trigger: Trigger::Keysym(CTRL_KEYSYM),
                 modifiers: Modifiers::ALT,
             },
-            press_action: Some(Action::CloseWindow),
-            release_action: Some(Action::CloseWindow),
+            action: BoundAction::Both {
+                press: Action::CloseWindow,
+                release: Action::CloseWindow,
+            },
             repeat: false,
             cooldown: None,
             allow_when_locked: false,
@@ -6599,7 +6618,10 @@ mod tests {
         assert_matches!(
             filter,
             ShouldInterceptResult::ForwardAndHandle(Bind {
-                press_action: Some(Action::CloseWindow),
+                action: BoundAction::Both {
+                    press: Action::CloseWindow,
+                    ..
+                },
                 ..
             })
         );
@@ -6613,7 +6635,10 @@ mod tests {
         assert_matches!(
             filter,
             ShouldInterceptResult::ForwardAndHandle(Bind {
-                release_action: Some(Action::CloseWindow),
+                action: BoundAction::Both {
+                    release: Action::CloseWindow,
+                    ..
+                },
                 ..
             })
         );
@@ -6626,8 +6651,7 @@ mod tests {
                 trigger: Trigger::Keysym(CTRL_KEYSYM),
                 modifiers: Modifiers::COMPOSITOR,
             },
-            press_action: None,
-            release_action: Some(Action::CloseWindow),
+            action: BoundAction::Release(Action::CloseWindow),
             repeat: false,
             cooldown: None,
             allow_when_locked: false,
@@ -6657,7 +6681,7 @@ mod tests {
         assert_matches!(
             filter,
             ShouldInterceptResult::ForwardAndHandle(Bind {
-                release_action: Some(Action::CloseWindow),
+                action: BoundAction::Release(Action::CloseWindow),
                 ..
             })
         );
@@ -6671,8 +6695,7 @@ mod tests {
                 trigger: Trigger::Keysym(CLOSE_KEYSYM),
                 modifiers: Modifiers::COMPOSITOR | Modifiers::CTRL,
             },
-            press_action: None,
-            release_action: Some(Action::CloseWindow),
+            action: BoundAction::Release(Action::CloseWindow),
             repeat: false,
             cooldown: None,
             allow_when_locked: false,

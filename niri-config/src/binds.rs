@@ -22,8 +22,7 @@ pub struct Binds(pub Vec<Bind>);
 #[derive(Debug, Clone, PartialEq)]
 pub struct Bind {
     pub key: Key,
-    pub press_action: Option<Action>,
-    pub release_action: Option<Action>,
+    pub action: BoundAction,
     pub repeat: bool,
     pub cooldown: Option<Duration>,
     pub allow_when_locked: bool,
@@ -31,24 +30,40 @@ pub struct Bind {
     pub hotkey_overlay_title: Option<Option<String>>,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum BoundAction {
+    Press(Action),
+    Release(Action),
+    Both { press: Action, release: Action },
+}
+
 impl Bind {
     pub fn has_press(&self) -> bool {
-        self.press_action.is_some()
+        matches!(
+            self.action,
+            BoundAction::Press(_) | BoundAction::Both { .. }
+        )
     }
 
     pub fn has_release(&self) -> bool {
-        self.release_action.is_some()
+        matches!(
+            self.action,
+            BoundAction::Release(_) | BoundAction::Both { .. }
+        )
     }
 
-    pub fn is_release_only(&self) -> bool {
-        self.press_action.is_none() && self.release_action.is_some()
+    pub fn press_action(&self) -> Option<&Action> {
+        match &self.action {
+            BoundAction::Press(action) | BoundAction::Both { press: action, .. } => Some(action),
+            BoundAction::Release(_) => None,
+        }
     }
 
-    pub fn action_for(&self, pressed: bool) -> Option<&Action> {
-        if pressed {
-            self.press_action.as_ref()
-        } else {
-            self.release_action.as_ref()
+    pub fn action_for(&self, pressed: bool) -> &Action {
+        match &self.action {
+            BoundAction::Press(action) | BoundAction::Release(action) => action,
+            BoundAction::Both { press, .. } if pressed => press,
+            BoundAction::Both { release, .. } => release,
         }
     }
 }
@@ -909,8 +924,7 @@ where
         // even if their contents are not valid.
         let dummy = Self {
             key,
-            press_action: Some(Action::Spawn(vec![])),
-            release_action: None,
+            action: BoundAction::Press(Action::Spawn(vec![])),
             repeat: true,
             cooldown: None,
             allow_when_locked: false,
@@ -1041,22 +1055,6 @@ where
             release_action = None;
         }
 
-        if press_action.is_none() && release_action.is_none() {
-            // If a press or release section was present, an error about its missing or invalid
-            // action was already emitted above.
-            let has_section = node.children().any(|child| {
-                let name = child.node_name.as_ref();
-                name == "press" || name == "release"
-            });
-            if !has_section {
-                ctx.emit_error(DecodeError::missing(
-                    node,
-                    "expected an action for this keybind",
-                ));
-            }
-            return Ok(dummy);
-        }
-
         if let Some(node) = repeat_node {
             if repeat == Some(true) && press_action.is_none() && release_action.is_some() {
                 ctx.emit_error(DecodeError::unexpected(
@@ -1103,10 +1101,30 @@ where
             None => release_action.is_none(),
         };
 
+        let action = match (press_action, release_action) {
+            (Some(press), Some(release)) => BoundAction::Both { press, release },
+            (Some(press), None) => BoundAction::Press(press),
+            (None, Some(release)) => BoundAction::Release(release),
+            (None, None) => {
+                // If a press or release section was present, an error about its missing or
+                // invalid action was already emitted above.
+                let has_section = node.children().any(|child| {
+                    let name = child.node_name.as_ref();
+                    name == "press" || name == "release"
+                });
+                if !has_section {
+                    ctx.emit_error(DecodeError::missing(
+                        node,
+                        "expected an action for this keybind",
+                    ));
+                }
+                return Ok(dummy);
+            }
+        };
+
         Ok(Self {
             key,
-            press_action,
-            release_action,
+            action,
             repeat,
             cooldown,
             allow_when_locked,
