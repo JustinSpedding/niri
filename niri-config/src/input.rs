@@ -545,13 +545,7 @@ mod tests {
     fn mod_key_names_are_consistent() {
         // The X11 `ModN` modifier indices are a separate numbering from the ISO level numbers,
         // and the two happen to be crossed over: ISO Level 3 Shift is Mod5, and ISO Level 5 Shift
-        // is Mod3. Guard against "fixing" this apparent mismatch into an actual mix-up.
-        //
-        // See the xkbcommon `MOD_NAME_*` constants:
-        // - `MOD_NAME_ISO_LEVEL3_SHIFT` is "Mod5"
-        // - `MOD_NAME_MOD3` is "Mod3"
-        // Smithay derives `ModifiersState::iso_level3_shift` from the former and
-        // `iso_level5_shift` from the latter.
+        // is Mod3. This test guards against "fixing" this apparent mismatch.
         for (name, modifier, keysym, modifiers) in [
             (
                 "Mod5",
