@@ -413,7 +413,7 @@ impl FromStr for WarpMouseToFocusMode {
     }
 }
 
-#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy, Hash)]
 pub enum ModKey {
     Ctrl,
     Shift,
@@ -435,20 +435,21 @@ impl ModKey {
         }
     }
 
+    /// Returns the modifier key for a keysym, if the keysym is a modifier key.
+    pub fn from_keysym(keysym: Keysym) -> Option<Self> {
+        match keysym.raw() {
+            keysyms::KEY_Control_L | keysyms::KEY_Control_R => Some(Self::Ctrl),
+            keysyms::KEY_Shift_L | keysyms::KEY_Shift_R => Some(Self::Shift),
+            keysyms::KEY_Alt_L | keysyms::KEY_Alt_R => Some(Self::Alt),
+            keysyms::KEY_Super_L | keysyms::KEY_Super_R => Some(Self::Super),
+            keysyms::KEY_ISO_Level3_Shift => Some(Self::IsoLevel3Shift),
+            keysyms::KEY_ISO_Level5_Shift => Some(Self::IsoLevel5Shift),
+            _ => None,
+        }
+    }
+
     pub fn matches_keysym(&self, keysym: Keysym) -> bool {
-        matches!(
-            (self, keysym.raw()),
-            (ModKey::Ctrl, keysyms::KEY_Control_L)
-                | (ModKey::Ctrl, keysyms::KEY_Control_R)
-                | (ModKey::Shift, keysyms::KEY_Shift_L)
-                | (ModKey::Shift, keysyms::KEY_Shift_R)
-                | (ModKey::Alt, keysyms::KEY_Alt_L)
-                | (ModKey::Alt, keysyms::KEY_Alt_R)
-                | (ModKey::Super, keysyms::KEY_Super_L)
-                | (ModKey::Super, keysyms::KEY_Super_R)
-                | (ModKey::IsoLevel3Shift, keysyms::KEY_ISO_Level3_Shift)
-                | (ModKey::IsoLevel5Shift, keysyms::KEY_ISO_Level5_Shift)
-        )
+        Self::from_keysym(keysym) == Some(*self)
     }
 }
 
@@ -538,6 +539,61 @@ mod tests {
             .map_err(miette::Report::new)
             .unwrap();
         Input::from_part(&part)
+    }
+
+    #[test]
+    fn mod_key_names_are_consistent() {
+        // The X11 `ModN` modifier indices are a separate numbering from the ISO level numbers,
+        // and the two happen to be crossed over: ISO Level 3 Shift is Mod5, and ISO Level 5 Shift
+        // is Mod3. Guard against "fixing" this apparent mismatch into an actual mix-up.
+        //
+        // See the xkbcommon `MOD_NAME_*` constants:
+        // - `MOD_NAME_ISO_LEVEL3_SHIFT` is "Mod5"
+        // - `MOD_NAME_MOD3` is "Mod3"
+        // Smithay derives `ModifiersState::iso_level3_shift` from the former and
+        // `iso_level5_shift` from the latter.
+        for (name, modifier, keysym, modifiers) in [
+            (
+                "Mod5",
+                ModKey::IsoLevel3Shift,
+                keysyms::KEY_ISO_Level3_Shift,
+                Modifiers::ISO_LEVEL3_SHIFT,
+            ),
+            (
+                "Mod3",
+                ModKey::IsoLevel5Shift,
+                keysyms::KEY_ISO_Level5_Shift,
+                Modifiers::ISO_LEVEL5_SHIFT,
+            ),
+        ] {
+            // Name -> variant.
+            assert_eq!(
+                name.parse::<ModKey>().unwrap(),
+                modifier,
+                "parsing `{name}`"
+            );
+
+            // Keysym -> variant.
+            assert_eq!(
+                ModKey::from_keysym(Keysym::from(keysym)),
+                Some(modifier),
+                "keysym for `{name}`",
+            );
+            assert!(modifier.matches_keysym(Keysym::from(keysym)));
+
+            // Variant -> held modifiers.
+            assert_eq!(modifier.to_modifiers(), modifiers, "modifiers for `{name}`");
+        }
+
+        // ISO_Level3_Shift and Mod5 are the same modifier, and so are ISO_Level5_Shift and Mod3.
+        assert_eq!(
+            "ISO_Level3_Shift".parse::<ModKey>().unwrap(),
+            "Mod5".parse::<ModKey>().unwrap()
+        );
+        assert_eq!(
+            "ISO_Level5_Shift".parse::<ModKey>().unwrap(),
+            "Mod3".parse::<ModKey>().unwrap()
+        );
     }
 
     #[test]

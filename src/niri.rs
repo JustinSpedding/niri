@@ -328,8 +328,8 @@ pub struct Niri {
     pub suppressed_keys: HashSet<Keycode>,
     /// Button codes of the mouse buttons to suppress.
     pub suppressed_buttons: HashSet<u32>,
-    /// Binds whose press action was triggered, keyed by the key code.
-    pub pending_release_binds: HashMap<Keycode, Bind>,
+    /// Binds whose release action is pending, keyed by the key code.
+    pub pending_release_binds: HashMap<Keycode, PendingReleaseBind>,
     /// Same as `pending_release_binds`, but for mouse buttons, keyed by the button code.
     pub pending_mouse_release_binds: HashMap<u32, Bind>,
     /// Same as `pending_release_binds`, but for tablet tool buttons, keyed by the button code.
@@ -640,6 +640,22 @@ pub struct PendingMruCommit {
     id: MappedId,
     token: RegistrationToken,
     stamp: Duration,
+}
+
+/// A bind whose release action is waiting for its key to be released.
+#[derive(Debug, Clone)]
+pub struct PendingReleaseBind {
+    pub bind: Bind,
+    pub cancel_on_other_input: bool,
+}
+
+impl PendingReleaseBind {
+    pub fn new(bind: Bind) -> Self {
+        Self {
+            cancel_on_other_input: bind.is_modifier_only_release(),
+            bind,
+        }
+    }
 }
 
 impl RedrawState {

@@ -50,7 +50,7 @@ use self::spatial_movement_grab::SpatialMovementGrab;
 use crate::dbus::freedesktop_a11y::KbMonBlock;
 use crate::layout::scrolling::ScrollDirection;
 use crate::layout::{ActivateWindow, LayoutElement as _};
-use crate::niri::{CastTarget, PointerVisibility, State};
+use crate::niri::{CastTarget, PendingReleaseBind, PointerVisibility, State};
 use crate::ui::mru::{WindowMru, WindowMruUi};
 use crate::ui::screenshot_ui::ScreenshotUi;
 use crate::utils::spawning::{spawn, spawn_sh};
@@ -2845,6 +2845,8 @@ impl State {
         }
 
         if ButtonState::Pressed == button_state {
+            cancel_interrupted_release_binds(&mut self.niri.pending_release_binds);
+
             let mut is_mru_open = false;
             if let Some(mru_output) = self.niri.window_mru_ui.output() {
                 is_mru_open = true;
@@ -3208,6 +3210,8 @@ impl State {
                 || is_mru_open
                 || self.niri.mods_with_wheel_binds.contains(&modifiers);
             if should_handle {
+                cancel_interrupted_release_binds(&mut self.niri.pending_release_binds);
+
                 let horizontal = horizontal_amount_v120.unwrap_or(0.);
                 let ticks = self.niri.horizontal_wheel_tracker.accumulate(horizontal);
                 if ticks != 0 {
@@ -3490,6 +3494,8 @@ impl State {
             }
 
             if is_mru_open || self.niri.mods_with_finger_scroll_binds.contains(&modifiers) {
+                cancel_interrupted_release_binds(&mut self.niri.pending_release_binds);
+
                 let ticks = self
                     .niri
                     .horizontal_finger_scroll_tracker
@@ -3974,6 +3980,10 @@ impl State {
 
             if self.niri.suppressed_buttons.remove(&button) {
                 return;
+            }
+
+            if button_state == ButtonState::Pressed {
+                cancel_interrupted_release_binds(&mut self.niri.pending_release_binds);
             }
 
             // Handle press binds.
@@ -4590,6 +4600,12 @@ impl State {
     }
 }
 
+fn cancel_interrupted_release_binds(
+    pending_release_binds: &mut HashMap<Keycode, PendingReleaseBind>,
+) {
+    pending_release_binds.retain(|_, pending| !pending.cancel_on_other_input);
+}
+
 /// Checks whether the key should be intercepted, and tracks the presses of intercepted keys.
 ///
 /// An intercepted key press is recorded in `suppressed_keys`, which prevents its release from
@@ -4598,10 +4614,12 @@ impl State {
 /// released, regardless of the modifiers held at that point and of any input in between.
 ///
 /// A release action only triggers if the bind's modifiers matched when the key was pressed.
+///
+/// Release-only binds on a single modifier key are additionally cancelled by any other input
 #[allow(clippy::too_many_arguments)]
 fn should_intercept_key<'a>(
     suppressed_keys: &mut HashSet<Keycode>,
-    pending_release_binds: &mut HashMap<Keycode, Bind>,
+    pending_release_binds: &mut HashMap<Keycode, PendingReleaseBind>,
     bindings: impl IntoIterator<Item = &'a Bind> + Clone,
     mod_key: ModKey,
     key_code: Keycode,
@@ -4614,7 +4632,9 @@ fn should_intercept_key<'a>(
     is_inhibiting_shortcuts: bool,
 ) -> ShouldInterceptResult {
     if !pressed {
-        if let Some(bind) = pending_release_binds.remove(&key_code) {
+        if let Some(pending) = pending_release_binds.remove(&key_code) {
+            let bind = pending.bind;
+
             if suppressed_keys.remove(&key_code) {
                 return ShouldInterceptResult::InterceptAndHandle(bind);
             } else {
@@ -4622,6 +4642,8 @@ fn should_intercept_key<'a>(
             }
         }
     }
+
+    cancel_interrupted_release_binds(pending_release_binds);
 
     let mut final_bind = if pressed {
         find_bind(
@@ -4675,7 +4697,7 @@ fn should_intercept_key<'a>(
                 ShouldInterceptResult::Forward
             } else if modified.is_modifier_key() {
                 if bind.has_release() {
-                    pending_release_binds.insert(key_code, bind.clone());
+                    pending_release_binds.insert(key_code, PendingReleaseBind::new(bind.clone()));
                 }
                 if bind.has_press() {
                     ShouldInterceptResult::ForwardAndHandle(bind)
@@ -4685,7 +4707,7 @@ fn should_intercept_key<'a>(
             } else {
                 suppressed_keys.insert(key_code);
                 if bind.has_release() {
-                    pending_release_binds.insert(key_code, bind.clone());
+                    pending_release_binds.insert(key_code, PendingReleaseBind::new(bind.clone()));
                 }
                 if bind.has_press() {
                     ShouldInterceptResult::InterceptAndHandle(bind)
@@ -4751,11 +4773,15 @@ fn find_bind<'a>(
 
     let raw = raw?;
 
-    let trigger = if mod_key.matches_keysym(raw) {
-        Trigger::CompositorMod
-    } else {
-        Trigger::Keysym(raw)
-    };
+    // A modifier key can trigger binds bound as the compositor mod key (`Mod`), by its own keysym
+    // (like `Alt_L`), or as the modifier itself (like `Alt`). Try them in order of specificity.
+    let triggers = [
+        mod_key
+            .matches_keysym(raw)
+            .then_some(Trigger::CompositorMod),
+        Some(Trigger::Keysym(raw)),
+        ModKey::from_keysym(raw).map(Trigger::Modifier),
+    ];
 
     // It would maybe be better to return all matching binds instead of using a parameter to
     // prioritize them, but that would complicate things for the callers and right now there aren't
@@ -4763,8 +4789,15 @@ fn find_bind<'a>(
     //
     // Prefer press binds, but fall back to release-only binds so that the key press can be
     // intercepted and its release action triggered when the key is released.
-    find_configured_bind(bindings.clone(), mod_key, trigger, mods, true)
-        .or_else(|| find_configured_bind(bindings, mod_key, trigger, mods, false))
+    for trigger in triggers.into_iter().flatten() {
+        let bind = find_configured_bind(bindings.clone(), mod_key, trigger, mods, true)
+            .or_else(|| find_configured_bind(bindings.clone(), mod_key, trigger, mods, false));
+        if let Some(bind) = bind {
+            return Some(bind);
+        }
+    }
+
+    None
 }
 
 fn find_configured_bind<'a>(
@@ -4777,20 +4810,17 @@ fn find_configured_bind<'a>(
     // Handle configured binds.
     let mut modifiers = modifiers_from_state(mods);
 
-    // Check if the trigger is a modifier key (like Mod, Alt_L, Control_L, Shift_L, etc.)
+    // Check if the trigger is a modifier key (like Mod, Alt, Alt_L, Control_L, Shift_L, etc.)
     // If so, we need to remove its modifier from the current modifiers since the key is the
     // trigger, not a modifier.
-    let trigger_is_modifier = match trigger {
-        Trigger::CompositorMod => true,
-        Trigger::Keysym(keysym) => keysym.is_modifier_key(),
-        _ => false,
-    };
+    let trigger_is_modifier = trigger.is_modifier();
 
-    // Check if the trigger is the mod key itself, either bound as `Mod` or as its own keysym (like
-    // `Super_L` when the mod key is Super). In this case its modifier is part of the trigger,
-    // not a held modifier.
+    // Check if the trigger is the mod key itself, either bound as `Mod`, as its own keysym (like
+    // `Super_L` when the mod key is Super), or as the modifier itself (like `Super` when the mod
+    // key is Super). In this case its modifier is part of the trigger, not a held modifier.
     let trigger_is_mod_key = match trigger {
         Trigger::CompositorMod => true,
+        Trigger::Modifier(modifier) => modifier == mod_key,
         Trigger::Keysym(keysym) => trigger_is_modifier && mod_key.matches_keysym(keysym),
         _ => false,
     };
@@ -4799,7 +4829,7 @@ fn find_configured_bind<'a>(
         modifiers.remove(mod_key.to_modifiers());
     } else {
         if trigger_is_modifier {
-            let trigger_mod = keysym_to_modifiers(trigger);
+            let trigger_mod = trigger_to_modifiers(trigger);
             modifiers.remove(trigger_mod);
         }
         let mod_down = modifiers_from_state(mods).contains(mod_key.to_modifiers());
@@ -4837,22 +4867,12 @@ fn find_configured_bind<'a>(
     None
 }
 
-/// Convert a modifier keysym to its corresponding Modifiers flags.
-#[allow(non_upper_case_globals)]
-fn keysym_to_modifiers(trigger: Trigger) -> Modifiers {
+/// Convert a trigger to its corresponding Modifiers flags.
+fn trigger_to_modifiers(trigger: Trigger) -> Modifiers {
     match trigger {
-        Trigger::Keysym(keysym) => {
-            use smithay::input::keyboard::keysyms::*;
-            match keysym.raw() {
-                KEY_Shift_L | KEY_Shift_R => Modifiers::SHIFT,
-                KEY_Control_L | KEY_Control_R => Modifiers::CTRL,
-                KEY_Alt_L | KEY_Alt_R => Modifiers::ALT,
-                KEY_Super_L | KEY_Super_R => Modifiers::SUPER,
-                KEY_ISO_Level3_Shift => Modifiers::ISO_LEVEL3_SHIFT,
-                KEY_ISO_Level5_Shift => Modifiers::ISO_LEVEL5_SHIFT,
-                _ => Modifiers::empty(),
-            }
-        }
+        Trigger::Modifier(modifier) => modifier.to_modifiers(),
+        Trigger::Keysym(keysym) => ModKey::from_keysym(keysym)
+            .map_or(Modifiers::empty(), |modifier| modifier.to_modifiers()),
         _ => Modifiers::empty(),
     }
 }
@@ -5486,7 +5506,7 @@ mod tests {
         disable_power_key_handling: bool,
         is_inhibiting: bool,
         suppressed_keys: HashSet<Keycode>,
-        pending_release_binds: HashMap<Keycode, Bind>,
+        pending_release_binds: HashMap<Keycode, PendingReleaseBind>,
     }
 
     fn create_test_state() -> TestState {
@@ -5825,7 +5845,8 @@ mod tests {
         assert!(common_state.suppressed_keys.is_empty());
         assert!(!mods.logo);
 
-        // A different key pressed in between doesn't prevent the release bind from triggering
+        // A different key pressed in between cancels the release bind, since it is a modifier-only
+        // bind and the modifier may have been used for something else.
         let result = process_mod_key(&mut common_state, &bindings, &mut mods, true);
         assert_matches!(result, ShouldInterceptResult::Forward);
 
@@ -5833,13 +5854,7 @@ mod tests {
         assert_matches!(result, ShouldInterceptResult::Forward);
 
         let result = process_mod_key(&mut common_state, &bindings, &mut mods, false);
-        assert_matches!(
-            result,
-            ShouldInterceptResult::ForwardAndHandle(Bind {
-                action: BoundAction::Release(Action::ToggleOverview),
-                ..
-            })
-        );
+        assert_matches!(result, ShouldInterceptResult::Forward);
 
         let result = process_none_key(&mut common_state, &bindings, mods, false);
         assert_matches!(result, ShouldInterceptResult::Forward);
@@ -5858,18 +5873,12 @@ mod tests {
         );
 
         let result = process_mod_key(&mut common_state, &bindings, &mut mods, false);
-        assert_matches!(
-            result,
-            ShouldInterceptResult::ForwardAndHandle(Bind {
-                action: BoundAction::Release(Action::ToggleOverview),
-                ..
-            })
-        );
+        assert_matches!(result, ShouldInterceptResult::Forward);
 
         let result = process_other_key(&mut common_state, &bindings, mods, false);
         assert_matches!(result, ShouldInterceptResult::InterceptOnly);
 
-        // Release binds on regular keys fire regardless of the release order
+        // Release-only binds on regular keys are not affected: their release always triggers.
         let result = process_mod_key(&mut common_state, &bindings, &mut mods, true);
         assert_matches!(result, ShouldInterceptResult::Forward);
 
@@ -5877,13 +5886,7 @@ mod tests {
         assert_matches!(result, ShouldInterceptResult::InterceptOnly);
 
         let result = process_mod_key(&mut common_state, &bindings, &mut mods, false);
-        assert_matches!(
-            result,
-            ShouldInterceptResult::ForwardAndHandle(Bind {
-                action: BoundAction::Release(Action::ToggleOverview),
-                ..
-            })
-        );
+        assert_matches!(result, ShouldInterceptResult::Forward);
 
         let result = process_close_key(&mut common_state, &bindings, mods, false);
         assert_matches!(
@@ -5911,13 +5914,7 @@ mod tests {
         );
 
         let result = process_mod_key(&mut common_state, &bindings, &mut mods, false);
-        assert_matches!(
-            result,
-            ShouldInterceptResult::ForwardAndHandle(Bind {
-                action: BoundAction::Release(Action::ToggleOverview),
-                ..
-            })
-        );
+        assert_matches!(result, ShouldInterceptResult::Forward);
 
         // Test case: inhibited release bindings
         common_state.is_inhibiting = true;
@@ -6725,5 +6722,215 @@ mod tests {
         assert_matches!(filter, ShouldInterceptResult::Forward);
         assert!(state.suppressed_keys.is_empty());
         assert!(state.pending_release_binds.is_empty());
+    }
+
+    #[test]
+    fn modifier_only_release_bind() {
+        // `Mod { release { close-window; } }`
+        let bindings = Binds(vec![Bind {
+            key: Key {
+                trigger: Trigger::CompositorMod,
+                modifiers: Modifiers::empty(),
+            },
+            action: BoundAction::Release(Action::CloseWindow),
+            repeat: false,
+            cooldown: None,
+            allow_when_locked: false,
+            allow_inhibiting: true,
+            hotkey_overlay_title: None,
+        }]);
+
+        let mut state = create_test_state();
+        let mut mods: ModifiersState = Default::default();
+
+        // Pressing and releasing Mod by itself triggers the bind.
+        let filter = process_mod_key(&mut state, &bindings, &mut mods, true);
+        assert_matches!(filter, ShouldInterceptResult::Forward);
+
+        let filter = process_mod_key(&mut state, &bindings, &mut mods, false);
+        assert_matches!(
+            filter,
+            ShouldInterceptResult::ForwardAndHandle(Bind {
+                action: BoundAction::Release(Action::CloseWindow),
+                ..
+            })
+        );
+
+        // Pressing another key in between cancels the bind.
+        let filter = process_mod_key(&mut state, &bindings, &mut mods, true);
+        assert_matches!(filter, ShouldInterceptResult::Forward);
+
+        let filter = process_none_key(&mut state, &bindings, mods, true);
+        assert_matches!(filter, ShouldInterceptResult::Forward);
+        assert!(state.pending_release_binds.is_empty());
+
+        let filter = process_mod_key(&mut state, &bindings, &mut mods, false);
+        assert_matches!(filter, ShouldInterceptResult::Forward);
+    }
+
+    #[test]
+    fn modifier_only_release_bind_cancelled_by_shortcut() {
+        // `Mod { release { toggle-overview; } }` together with `Mod+Q { close-window; }`.
+        let bindings = Binds(vec![
+            Bind {
+                key: Key {
+                    trigger: Trigger::CompositorMod,
+                    modifiers: Modifiers::empty(),
+                },
+                action: BoundAction::Release(Action::ToggleOverview),
+                repeat: false,
+                cooldown: None,
+                allow_when_locked: false,
+                allow_inhibiting: true,
+                hotkey_overlay_title: None,
+            },
+            Bind {
+                key: Key {
+                    trigger: Trigger::Keysym(CLOSE_KEYSYM),
+                    modifiers: Modifiers::COMPOSITOR,
+                },
+                action: BoundAction::Press(Action::CloseWindow),
+                repeat: true,
+                cooldown: None,
+                allow_when_locked: false,
+                allow_inhibiting: true,
+                hotkey_overlay_title: None,
+            },
+        ]);
+
+        let mut state = create_test_state();
+        let mut mods: ModifiersState = Default::default();
+
+        // Pressing Mod arms its release bind.
+        let filter = process_mod_key(&mut state, &bindings, &mut mods, true);
+        assert_matches!(filter, ShouldInterceptResult::Forward);
+
+        // Using Mod in another shortcut cancels it.
+        let filter = process_close_key(&mut state, &bindings, mods, true);
+        assert_matches!(filter, ShouldInterceptResult::InterceptAndHandle(_));
+
+        let filter = process_close_key(&mut state, &bindings, mods, false);
+        assert_matches!(filter, ShouldInterceptResult::InterceptOnly);
+
+        // So releasing Mod does not trigger it.
+        let filter = process_mod_key(&mut state, &bindings, &mut mods, false);
+        assert_matches!(filter, ShouldInterceptResult::Forward);
+    }
+
+    #[test]
+    fn modifier_only_press_and_release_bind() {
+        // `Mod { press { close-window; } release { center-column; } }`
+        let bindings = Binds(vec![Bind {
+            key: Key {
+                trigger: Trigger::CompositorMod,
+                modifiers: Modifiers::empty(),
+            },
+            action: BoundAction::Both {
+                press: Action::CloseWindow,
+                release: Action::CenterColumn,
+            },
+            repeat: false,
+            cooldown: None,
+            allow_when_locked: false,
+            allow_inhibiting: true,
+            hotkey_overlay_title: None,
+        }]);
+
+        let mut state = create_test_state();
+        let mut mods: ModifiersState = Default::default();
+
+        let filter = process_mod_key(&mut state, &bindings, &mut mods, true);
+        assert_matches!(
+            filter,
+            ShouldInterceptResult::ForwardAndHandle(Bind {
+                action: BoundAction::Both {
+                    press: Action::CloseWindow,
+                    ..
+                },
+                ..
+            })
+        );
+
+        // Push-to-talk: other keys in between do not cancel the release action.
+        let filter = process_none_key(&mut state, &bindings, mods, true);
+        assert_matches!(filter, ShouldInterceptResult::Forward);
+        assert!(!state.pending_release_binds.is_empty());
+
+        let filter = process_mod_key(&mut state, &bindings, &mut mods, false);
+        assert_matches!(
+            filter,
+            ShouldInterceptResult::ForwardAndHandle(Bind {
+                action: BoundAction::Both {
+                    release: Action::CenterColumn,
+                    ..
+                },
+                ..
+            })
+        );
+    }
+
+    #[test]
+    fn bare_modifier_release_bind() {
+        // `Ctrl { release { close-window; } }`
+        let bindings = Binds(vec![Bind {
+            key: Key {
+                trigger: Trigger::Modifier(ModKey::Ctrl),
+                modifiers: Modifiers::empty(),
+            },
+            action: BoundAction::Release(Action::CloseWindow),
+            repeat: false,
+            cooldown: None,
+            allow_when_locked: false,
+            allow_inhibiting: true,
+            hotkey_overlay_title: None,
+        }]);
+
+        let mut state = create_test_state();
+
+        // Control_L matches the `Ctrl` trigger through its modifier.
+        let filter = process_ctrl_key(&mut state, &bindings, ModifiersState::default(), true);
+        assert_matches!(filter, ShouldInterceptResult::Forward);
+
+        let filter = process_ctrl_key(&mut state, &bindings, ModifiersState::default(), false);
+        assert_matches!(
+            filter,
+            ShouldInterceptResult::ForwardAndHandle(Bind {
+                action: BoundAction::Release(Action::CloseWindow),
+                ..
+            })
+        );
+    }
+
+    #[test]
+    fn cancel_interrupted_release_binds_keeps_press_and_release_binds() {
+        let modifier_only = Bind {
+            key: Key {
+                trigger: Trigger::CompositorMod,
+                modifiers: Modifiers::empty(),
+            },
+            action: BoundAction::Release(Action::ToggleOverview),
+            repeat: false,
+            cooldown: None,
+            allow_when_locked: false,
+            allow_inhibiting: true,
+            hotkey_overlay_title: None,
+        };
+        let press_and_release = Bind {
+            action: BoundAction::Both {
+                press: Action::CloseWindow,
+                release: Action::CenterColumn,
+            },
+            ..modifier_only.clone()
+        };
+
+        let mut pending_release_binds = HashMap::new();
+        pending_release_binds.insert(MOD_KEY_CODE, PendingReleaseBind::new(modifier_only));
+        pending_release_binds.insert(CLOSE_KEY_CODE, PendingReleaseBind::new(press_and_release));
+
+        cancel_interrupted_release_binds(&mut pending_release_binds);
+
+        // Only the modifier-only bind is cancelled, so that push-to-talk keeps working.
+        assert!(!pending_release_binds.contains_key(&MOD_KEY_CODE));
+        assert!(pending_release_binds.contains_key(&CLOSE_KEY_CODE));
     }
 }

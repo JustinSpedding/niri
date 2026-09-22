@@ -633,6 +633,7 @@ impl ConfigPath {
 mod tests {
     use insta::{assert_debug_snapshot, assert_snapshot};
     use pretty_assertions::assert_eq;
+    use smithay::input::keyboard::Keysym;
 
     use super::*;
 
@@ -769,6 +770,78 @@ mod tests {
                 release: Action::ToggleOverview,
             }
         ));
+    }
+
+    #[test]
+    fn parse_bare_modifier_keys() {
+        let config = do_parse(
+            r#"
+            binds {
+                Mod {
+                    release { toggle-overview; }
+                }
+                Ctrl {
+                    release { close-window; }
+                }
+                Shift {
+                    release { close-window; }
+                }
+                Alt {
+                    release { close-window; }
+                }
+                Super {
+                    release { close-window; }
+                }
+                Mod5 {
+                    release { close-window; }
+                }
+                Mod3 {
+                    release { close-window; }
+                }
+
+                Ctrl+Alt_L {
+                    release { close-window; }
+                }
+                Alt_L {
+                    release { close-window; }
+                }
+            }
+            "#,
+        );
+
+        let triggers = config
+            .binds
+            .0
+            .iter()
+            .map(|bind| bind.key.trigger)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            triggers,
+            vec![
+                Trigger::CompositorMod,
+                Trigger::Modifier(ModKey::Ctrl),
+                Trigger::Modifier(ModKey::Shift),
+                Trigger::Modifier(ModKey::Alt),
+                Trigger::Modifier(ModKey::Super),
+                Trigger::Modifier(ModKey::IsoLevel3Shift),
+                Trigger::Modifier(ModKey::IsoLevel5Shift),
+                Trigger::Keysym(Keysym::Alt_L),
+                Trigger::Keysym(Keysym::Alt_L),
+            ]
+        );
+
+        // Ctrl+Alt_L spells out the trigger keysym with Ctrl as a held modifier.
+        assert_eq!(config.binds.0[7].key.modifiers, Modifiers::CTRL);
+        assert_eq!(config.binds.0[8].key.modifiers, Modifiers::empty());
+
+        // Only bare modifier binds count as modifier-only: a single modifier key with no other
+        // modifiers. `Alt_L` alone is the same key as `Alt`, so it counts too, while `Ctrl+Alt_L`
+        // is a modifier combo and does not.
+        assert!(config.binds.0[0].is_modifier_only_release());
+        assert!(config.binds.0[4].is_modifier_only_release());
+        assert!(!config.binds.0[7].is_modifier_only_release());
+        assert!(config.binds.0[8].is_modifier_only_release());
     }
 
     #[test]

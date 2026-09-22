@@ -121,11 +121,25 @@ binds {
 }
 ```
 
+Any modifier key can be bound by itself, using the same names as the `mod-key` setting: `Mod`, `Ctrl`, `Shift`, `Alt`, `Super`, `Mod5` (ISO Level 3 Shift), and `Mod3` (ISO Level 5 Shift):
+
+```kdl
+binds {
+    // Press and release Alt by itself to open a launcher.
+    Alt { release { spawn "wofi"; }; }
+}
+```
+
+A release-only bind on a single modifier key like this only triggers if the modifier was not used for anything else in between.
+So if you press `Mod`, then press `Q` to trigger a `Mod+Q` bind, releasing `Mod` will not trigger the `Mod` bind.
+This makes it safe to bind a modifier key by itself, since using it in other shortcuts will not trigger it.
+
 Release bindings are useful when you want to bind a modifier key to an action.
 Modifiers usually participate in other bindings, so a press binding would trigger every time you try to input another binding.
 
 In bindings with both press and release, the release action is guaranteed to trigger if the press action triggers.
 So your push-to-talk press-release binding will never get stuck pressed, no matter how you release the keys.
+For example, a `Mod { press { ...; } release { ...; }; }` binding triggers its release action even when you use `Mod` in another shortcut while holding it.
 
 By default, any key binding that includes a release action will have repeat turned off for its press action.
 This can be overridden with `repeat=true` if desired:

@@ -555,6 +555,14 @@ fn key_name(screen_reader: bool, mod_key: ModKey, key: &Key) -> String {
     let pretty = match key.trigger {
         Trigger::Keysym(keysym) => prettify_keysym_name(screen_reader, &keysym_get_name(keysym)),
         Trigger::CompositorMod => mod_key_pretty,
+        Trigger::Modifier(modifier) => match modifier {
+            ModKey::Ctrl => String::from("Ctrl"),
+            ModKey::Shift => String::from("Shift"),
+            ModKey::Alt => String::from("Alt"),
+            ModKey::Super => String::from("Super"),
+            ModKey::IsoLevel3Shift => String::from("Mod5"),
+            ModKey::IsoLevel5Shift => String::from("Mod3"),
+        },
         Trigger::MouseLeft => String::from("Mouse Left"),
         Trigger::MouseRight => String::from("Mouse Right"),
         Trigger::MouseMiddle => String::from("Mouse Middle"),
@@ -639,6 +647,46 @@ mod tests {
     fn test_format_bind() {
         // Not bound.
         assert_snapshot!(check("", Action::Screenshot(true, None)), @" (not bound) : Take a Screenshot");
+
+        // Bare modifier binds.
+        assert_snapshot!(
+            check(
+                r#"binds {
+                    Alt { close-window; }
+                }"#,
+                Action::CloseWindow,
+            ),
+            @" Alt : Close Focused Window"
+        );
+        assert_snapshot!(
+            check(
+                r#"binds {
+                    Ctrl { close-window; }
+                    Shift { close-window; }
+                }"#,
+                Action::CloseWindow,
+            ),
+            @" Ctrl : Close Focused Window"
+        );
+        assert_snapshot!(
+            check(
+                r#"binds {
+                    Mod5 { close-window; }
+                    Mod3 { close-window; }
+                }"#,
+                Action::CloseWindow,
+            ),
+            @" Mod5 : Close Focused Window"
+        );
+        assert_snapshot!(
+            check(
+                r#"binds {
+                    Super { close-window; }
+                }"#,
+                Action::CloseWindow,
+            ),
+            @" Super : Close Focused Window"
+        );
 
         // Bound with a default title.
         assert_snapshot!(

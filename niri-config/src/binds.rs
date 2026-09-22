@@ -13,6 +13,7 @@ use smithay::input::keyboard::keysyms::KEY_NoSymbol;
 use smithay::input::keyboard::xkb::{keysym_from_name, KEYSYM_CASE_INSENSITIVE, KEYSYM_NO_FLAGS};
 use smithay::input::keyboard::Keysym;
 
+use crate::input::ModKey;
 use crate::recent_windows::{MruDirection, MruFilter, MruScope};
 use crate::utils::{expect_only_children, MergeWith};
 
@@ -66,6 +67,10 @@ impl Bind {
             BoundAction::Both { release, .. } => release,
         }
     }
+
+    pub fn is_modifier_only_release(&self) -> bool {
+        !self.has_press() && self.key.modifiers.is_empty() && self.key.trigger.is_modifier()
+    }
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy, Hash)]
@@ -78,6 +83,7 @@ pub struct Key {
 pub enum Trigger {
     Keysym(Keysym),
     CompositorMod,
+    Modifier(ModKey),
     MouseLeft,
     MouseRight,
     MouseMiddle,
@@ -94,6 +100,16 @@ pub enum Trigger {
     TabletStylusButton1,
     TabletStylusButton2,
     TabletStylusButton3,
+}
+
+impl Trigger {
+    pub fn is_modifier(&self) -> bool {
+        match self {
+            Self::CompositorMod | Self::Modifier(_) => true,
+            Self::Keysym(keysym) => keysym.is_modifier_key(),
+            _ => false,
+        }
+    }
 }
 
 bitflags! {
@@ -1202,6 +1218,18 @@ impl FromStr for Key {
             Trigger::TabletStylusButton3
         } else if key.eq_ignore_ascii_case("Mod") {
             Trigger::CompositorMod
+        } else if key.eq_ignore_ascii_case("Ctrl") || key.eq_ignore_ascii_case("Control") {
+            Trigger::Modifier(ModKey::Ctrl)
+        } else if key.eq_ignore_ascii_case("Shift") {
+            Trigger::Modifier(ModKey::Shift)
+        } else if key.eq_ignore_ascii_case("Alt") {
+            Trigger::Modifier(ModKey::Alt)
+        } else if key.eq_ignore_ascii_case("Super") || key.eq_ignore_ascii_case("Win") {
+            Trigger::Modifier(ModKey::Super)
+        } else if key.eq_ignore_ascii_case("ISO_Level3_Shift") || key.eq_ignore_ascii_case("Mod5") {
+            Trigger::Modifier(ModKey::IsoLevel3Shift)
+        } else if key.eq_ignore_ascii_case("ISO_Level5_Shift") || key.eq_ignore_ascii_case("Mod3") {
+            Trigger::Modifier(ModKey::IsoLevel5Shift)
         } else {
             let mut keysym = keysym_from_name(key, KEYSYM_CASE_INSENSITIVE);
             // The keyboard event handling code can receive either
@@ -1299,6 +1327,59 @@ mod tests {
             Key {
                 trigger: Trigger::Keysym(Keysym::a),
                 modifiers: Modifiers::ISO_LEVEL5_SHIFT
+            },
+        );
+    }
+
+    #[test]
+    fn parse_bare_modifier_aliases() {
+        // Each modifier can be spelled with its canonical name or an alias. A bare modifier key
+        // parses to `Trigger::Modifier`, while spelling out a single keysym parses to
+        // `Trigger::Keysym`.
+        for (text, modifier) in [
+            ("Ctrl", ModKey::Ctrl),
+            ("Control", ModKey::Ctrl),
+            ("Shift", ModKey::Shift),
+            ("Alt", ModKey::Alt),
+            ("Super", ModKey::Super),
+            ("Win", ModKey::Super),
+            ("Mod5", ModKey::IsoLevel3Shift),
+            ("ISO_Level3_Shift", ModKey::IsoLevel3Shift),
+            ("Mod3", ModKey::IsoLevel5Shift),
+            ("ISO_Level5_Shift", ModKey::IsoLevel5Shift),
+        ] {
+            assert_eq!(
+                text.parse::<Key>().unwrap(),
+                Key {
+                    trigger: Trigger::Modifier(modifier),
+                    modifiers: Modifiers::empty(),
+                },
+                "parsing `{text}`",
+            );
+        }
+
+        // The mod key keeps its own trigger.
+        assert_eq!(
+            "Mod".parse::<Key>().unwrap(),
+            Key {
+                trigger: Trigger::CompositorMod,
+                modifiers: Modifiers::empty(),
+            },
+        );
+
+        // A modifier can also be used as a held modifier of another trigger.
+        assert_eq!(
+            "Ctrl+Alt_L".parse::<Key>().unwrap(),
+            Key {
+                trigger: Trigger::Keysym(Keysym::Alt_L),
+                modifiers: Modifiers::CTRL,
+            },
+        );
+        assert_eq!(
+            "Alt+Ctrl".parse::<Key>().unwrap(),
+            Key {
+                trigger: Trigger::Modifier(ModKey::Ctrl),
+                modifiers: Modifiers::ALT,
             },
         );
     }
