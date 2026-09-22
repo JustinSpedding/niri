@@ -2843,6 +2843,14 @@ impl State {
         let modifiers = modifiers_from_state(mods);
         let mod_down = modifiers.contains(mod_key.to_modifiers());
 
+        if ButtonState::Released == button_state {
+            if let Some(bind) = self.niri.pending_mouse_release_binds.remove(&button_code) {
+                self.niri.suppressed_buttons.remove(&button_code);
+                self.handle_bind(bind, false);
+                return;
+            }
+        }
+
         if self.niri.suppressed_buttons.remove(&button_code) {
             return;
         }
@@ -2885,13 +2893,17 @@ impl State {
                     let config = self.niri.config.borrow();
                     let bindings =
                         make_binds_iter(&config, &mut self.niri.window_mru_ui, modifiers);
-                    find_configured_bind(bindings, mod_key, trigger, mods, true)
+                    find_bind_for_trigger(bindings, mod_key, trigger, mods)
                 })
                 .filter(|bind| {
-                    !self.niri.screenshot_ui.is_open()
-                        || allowed_during_screenshot(bind.action_for(bind.has_press()))
+                    !self.niri.screenshot_ui.is_open() || bind_allowed_during_screenshot(bind)
                 }) {
                     self.niri.suppressed_buttons.insert(button_code);
+                    if should_record_release_bind(&bind, self.niri.is_locked()) {
+                        self.niri
+                            .pending_mouse_release_binds
+                            .insert(button_code, bind.clone());
+                    }
                     if bind.has_press() {
                         self.handle_bind(bind.clone(), true);
                     }
