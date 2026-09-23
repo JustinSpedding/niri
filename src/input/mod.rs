@@ -5549,6 +5549,65 @@ fn make_binds_iter<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::animation::Clock;
+
+    const CLOSE_KEYSYM: Keysym = Keysym::q;
+    const CLOSE_KEY_CODE: Keycode = Keycode::new(CLOSE_KEYSYM.raw());
+    struct TestState {
+        screenshot_ui: ScreenshotUi,
+        disable_power_key_handling: bool,
+        is_inhibiting: bool,
+        is_locked: bool,
+        suppressed_keys: HashSet<Keycode>,
+        pending_release_binds: HashMap<Keycode, Bind>,
+    }
+
+    fn create_test_state() -> TestState {
+        TestState {
+            screenshot_ui: ScreenshotUi::new(Clock::default(), Default::default()),
+            disable_power_key_handling: false,
+            is_inhibiting: false,
+            is_locked: false,
+            suppressed_keys: HashSet::new(),
+            pending_release_binds: HashMap::new(),
+        }
+    }
+
+    fn process_close_key(
+        state: &mut TestState,
+        bindings: &Binds,
+        mods: ModifiersState,
+        pressed: bool,
+    ) -> ShouldInterceptResult {
+        should_intercept_key(
+            &mut state.suppressed_keys,
+            &mut state.pending_release_binds,
+            &bindings.0,
+            ModKey::Super,
+            CLOSE_KEY_CODE,
+            CLOSE_KEYSYM,
+            Some(CLOSE_KEYSYM),
+            pressed,
+            mods,
+            &state.screenshot_ui,
+            state.disable_power_key_handling,
+            state.is_inhibiting,
+            state.is_locked,
+        )
+    }
+
+    // Helper macro for assertion
+    macro_rules! assert_matches {
+        ($expression:expr, $pattern:pat) => {
+            let value = $expression;
+            assert!(
+                matches!(value, $pattern),
+                "Expected {:?} to match {}",
+                value,
+                stringify!($pattern)
+            );
+        };
+    }
 
     #[test]
     fn comp_mod_handling() {
@@ -5792,4 +5851,227 @@ mod tests {
         );
     }
 
+    #[test]
+    fn bind_allowed_when_locked_requires_both_actions() {
+        let bind = |action| Bind {
+            key: Key {
+                trigger: Trigger::Keysym(CLOSE_KEYSYM),
+                modifiers: Modifiers::COMPOSITOR,
+            },
+            action,
+            repeat: false,
+            cooldown: None,
+            allow_when_locked: false,
+            allow_inhibiting: true,
+            hotkey_overlay_title: None,
+        };
+
+        // A bind with both actions requires both of them to be allowed when locked, otherwise its
+        // press could start something that its release would never undo.
+        let both = bind(BoundAction::Both {
+            press: Action::Suspend,
+            release: Action::CloseWindow,
+        });
+        assert!(!bind_allowed_when_locked(&both, true));
+
+        let both = bind(BoundAction::Both {
+            press: Action::CloseWindow,
+            release: Action::Suspend,
+        });
+        assert!(!bind_allowed_when_locked(&both, true));
+
+        let both = bind(BoundAction::Both {
+            press: Action::Suspend,
+            release: Action::PowerOffMonitors,
+        });
+        assert!(bind_allowed_when_locked(&both, true));
+        // The release always runs, since it only happens if the press ran.
+        assert!(bind_allowed_when_locked(&both, false));
+
+        // Binds with a single action only need that action to be allowed.
+        assert!(bind_allowed_when_locked(
+            &bind(BoundAction::Press(Action::Suspend)),
+            true
+        ));
+        assert!(!bind_allowed_when_locked(
+            &bind(BoundAction::Press(Action::CloseWindow)),
+            true
+        ));
+        assert!(bind_allowed_when_locked(
+            &bind(BoundAction::Release(Action::Suspend)),
+            false
+        ));
+        assert!(!bind_allowed_when_locked(
+            &bind(BoundAction::Release(Action::CloseWindow)),
+            false
+        ));
+
+        // allow-when-locked allows any bind.
+        let both = Bind {
+            allow_when_locked: true,
+            ..bind(BoundAction::Both {
+                press: Action::CloseWindow,
+                release: Action::CenterColumn,
+            })
+        };
+        assert!(bind_allowed_when_locked(&both, true));
+        assert!(bind_allowed_when_locked(&both, false));
+    }
+
+    #[test]
+    fn release_bind_recorded_only_if_allowed_when_locked() {
+        // `Mod+Q { press { suspend; } release { close-window; } }`: the press is allowed when
+        // locked, but the release isn't.
+        let bindings = Binds(vec![Bind {
+            key: Key {
+                trigger: Trigger::Keysym(CLOSE_KEYSYM),
+                modifiers: Modifiers::COMPOSITOR,
+            },
+            action: BoundAction::Both {
+                press: Action::Suspend,
+                release: Action::CloseWindow,
+            },
+            repeat: false,
+            cooldown: None,
+            allow_when_locked: false,
+            allow_inhibiting: true,
+            hotkey_overlay_title: None,
+        }]);
+
+        let mods = ModifiersState {
+            logo: true,
+            ..Default::default()
+        };
+
+        // While locked, the press must not run either, since its release could never undo it.
+        let mut state = TestState {
+            is_locked: true,
+            ..create_test_state()
+        };
+        let result = process_close_key(&mut state, &bindings, mods, true);
+        assert_matches!(result, ShouldInterceptResult::InterceptAndHandle(_));
+        assert!(state.pending_release_binds.is_empty());
+
+        // The release then runs no action either.
+        let result = process_close_key(&mut state, &bindings, mods, false);
+        assert_matches!(result, ShouldInterceptResult::InterceptOnly);
+        assert!(state.pending_release_binds.is_empty());
+
+        // While unlocked, the release is recorded, so that it still runs if the screen gets locked
+        // in between.
+        let mut state = create_test_state();
+        let result = process_close_key(&mut state, &bindings, mods, true);
+        assert_matches!(result, ShouldInterceptResult::InterceptAndHandle(_));
+        assert!(state.pending_release_binds.contains_key(&CLOSE_KEY_CODE));
+
+        let result = process_close_key(&mut state, &bindings, mods, false);
+        assert_matches!(
+            result,
+            ShouldInterceptResult::InterceptAndHandle(Bind {
+                action: BoundAction::Both {
+                    release: Action::CloseWindow,
+                    ..
+                },
+                ..
+            })
+        );
+        assert!(state.pending_release_binds.is_empty());
+    }
+
+    #[test]
+    fn release_only_bind_not_recorded_when_locked() {
+        // `Mod+Q { release { close-window; } }`
+        let bindings = Binds(vec![Bind {
+            key: Key {
+                trigger: Trigger::Keysym(CLOSE_KEYSYM),
+                modifiers: Modifiers::COMPOSITOR,
+            },
+            action: BoundAction::Release(Action::CloseWindow),
+            repeat: false,
+            cooldown: None,
+            allow_when_locked: false,
+            allow_inhibiting: true,
+            hotkey_overlay_title: None,
+        }]);
+
+        let mods = ModifiersState {
+            logo: true,
+            ..Default::default()
+        };
+
+        // While locked, the release action isn't allowed, so the bind isn't recorded and neither
+        // its press nor its release runs any action.
+        let mut state = TestState {
+            is_locked: true,
+            ..create_test_state()
+        };
+        let result = process_close_key(&mut state, &bindings, mods, true);
+        assert_matches!(result, ShouldInterceptResult::InterceptOnly);
+        assert!(state.pending_release_binds.is_empty());
+
+        let result = process_close_key(&mut state, &bindings, mods, false);
+        assert_matches!(result, ShouldInterceptResult::InterceptOnly);
+        assert!(state.pending_release_binds.is_empty());
+
+        // While unlocked, it is recorded and triggers on release.
+        let mut state = create_test_state();
+        let result = process_close_key(&mut state, &bindings, mods, true);
+        assert_matches!(result, ShouldInterceptResult::InterceptOnly);
+        assert!(state.pending_release_binds.contains_key(&CLOSE_KEY_CODE));
+
+        let result = process_close_key(&mut state, &bindings, mods, false);
+        assert_matches!(
+            result,
+            ShouldInterceptResult::InterceptAndHandle(Bind {
+                action: BoundAction::Release(Action::CloseWindow),
+                ..
+            })
+        );
+        assert!(state.pending_release_binds.is_empty());
+    }
+
+    #[test]
+    fn bind_allowed_during_screenshot_requires_both_actions() {
+        let bind = |action| Bind {
+            key: Key {
+                trigger: Trigger::Keysym(CLOSE_KEYSYM),
+                modifiers: Modifiers::COMPOSITOR,
+            },
+            action,
+            repeat: false,
+            cooldown: None,
+            allow_when_locked: false,
+            allow_inhibiting: true,
+            hotkey_overlay_title: None,
+        };
+
+        // MoveColumnLeft and MoveWindowUp are allowed while the screenshot UI is open, CloseWindow
+        // is not.
+        assert!(bind_allowed_during_screenshot(&bind(BoundAction::Press(
+            Action::MoveColumnLeft
+        ))));
+        assert!(!bind_allowed_during_screenshot(&bind(BoundAction::Press(
+            Action::CloseWindow
+        ))));
+        assert!(bind_allowed_during_screenshot(&bind(BoundAction::Release(
+            Action::MoveColumnLeft
+        ))));
+        assert!(!bind_allowed_during_screenshot(&bind(
+            BoundAction::Release(Action::CloseWindow)
+        )));
+
+        // A bind with both actions requires both of them to be allowed.
+        assert!(!bind_allowed_during_screenshot(&bind(BoundAction::Both {
+            press: Action::MoveColumnLeft,
+            release: Action::CloseWindow,
+        })));
+        assert!(!bind_allowed_during_screenshot(&bind(BoundAction::Both {
+            press: Action::CloseWindow,
+            release: Action::MoveColumnLeft,
+        })));
+        assert!(bind_allowed_during_screenshot(&bind(BoundAction::Both {
+            press: Action::MoveColumnLeft,
+            release: Action::MoveWindowUp,
+        })));
+    }
 }
