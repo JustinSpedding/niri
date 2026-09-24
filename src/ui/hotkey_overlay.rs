@@ -152,13 +152,23 @@ impl HotkeyOverlay {
     }
 }
 
+/// Returns the action that a bind triggers in the hotkey overlay, preferring its press action.
+fn bind_action(bind: &Bind) -> Option<&Action> {
+    bind.press_action().or_else(|| bind.release_action())
+}
+
+/// Whether the bind triggers the action, on press or on release.
+fn bind_triggers(bind: &Bind, action: &Action) -> bool {
+    bind.press_action() == Some(action) || bind.release_action() == Some(action)
+}
+
 fn format_bind(binds: &[Bind], action: &Action) -> Option<(Option<Key>, String)> {
     let mut bind_with_non_null = None;
     let mut bind_with_custom_title = None;
     let mut found_null_title = false;
 
     for bind in binds {
-        if bind.press_action() != Some(action) {
+        if !bind_triggers(bind, action) {
             continue;
         }
 
@@ -204,12 +214,12 @@ fn collect_actions(config: &Config) -> Vec<&Action> {
     // Quit(false).
     if binds
         .iter()
-        .any(|bind| matches!(bind.press_action(), Some(Action::Quit(false))))
+        .any(|bind| bind_triggers(bind, &Action::Quit(false)))
     {
         actions.push(&Action::Quit(false));
     } else if binds
         .iter()
-        .any(|bind| matches!(bind.press_action(), Some(Action::Quit(true))))
+        .any(|bind| bind_triggers(bind, &Action::Quit(true)))
     {
         actions.push(&Action::Quit(true));
     } else {
@@ -229,14 +239,14 @@ fn collect_actions(config: &Config) -> Vec<&Action> {
     // Prefer move-column-to-workspace-down, but fall back to move-window-to-workspace-down.
     if let Some(bind) = binds.iter().find(|bind| {
         matches!(
-            bind.press_action(),
+            bind_action(bind),
             Some(Action::MoveColumnToWorkspaceDown(_))
         )
     }) {
-        actions.push(bind.press_action().unwrap());
+        actions.push(bind_action(bind).unwrap());
     } else if binds.iter().any(|bind| {
         matches!(
-            bind.press_action(),
+            bind_action(bind),
             Some(Action::MoveWindowToWorkspaceDown(_))
         )
     }) {
@@ -246,19 +256,15 @@ fn collect_actions(config: &Config) -> Vec<&Action> {
     }
 
     // Same for -up.
-    if let Some(bind) = binds.iter().find(|bind| {
-        matches!(
-            bind.press_action(),
-            Some(Action::MoveColumnToWorkspaceUp(_))
-        )
-    }) {
-        actions.push(bind.press_action().unwrap());
-    } else if binds.iter().any(|bind| {
-        matches!(
-            bind.press_action(),
-            Some(Action::MoveWindowToWorkspaceUp(_))
-        )
-    }) {
+    if let Some(bind) = binds
+        .iter()
+        .find(|bind| matches!(bind_action(bind), Some(Action::MoveColumnToWorkspaceUp(_))))
+    {
+        actions.push(bind_action(bind).unwrap());
+    } else if binds
+        .iter()
+        .any(|bind| matches!(bind_action(bind), Some(Action::MoveWindowToWorkspaceUp(_))))
+    {
         actions.push(&Action::MoveWindowToWorkspaceUp(true));
     } else {
         actions.push(&Action::MoveColumnToWorkspaceUp(true));
@@ -277,16 +283,16 @@ fn collect_actions(config: &Config) -> Vec<&Action> {
     // Screenshot is not as important, can omit if not bound.
     if let Some(bind) = binds
         .iter()
-        .find(|bind| matches!(bind.press_action(), Some(Action::Screenshot(_, _))))
+        .find(|bind| matches!(bind_action(bind), Some(Action::Screenshot(_, _))))
     {
-        actions.push(bind.press_action().unwrap());
+        actions.push(bind_action(bind).unwrap());
     }
 
     // Add actions with a custom hotkey-overlay-title.
     for bind in binds {
         if matches!(bind.hotkey_overlay_title, Some(Some(_))) {
             // Avoid duplicate actions.
-            if let Some(action) = bind.press_action() {
+            if let Some(action) = bind_action(bind) {
                 if !actions.contains(&action) {
                     actions.push(action);
                 }
@@ -296,14 +302,18 @@ fn collect_actions(config: &Config) -> Vec<&Action> {
 
     // Add the spawn actions.
     for bind in binds.iter().filter(|bind| {
-        matches!(bind.press_action(), Some(Action::Spawn(_)) | Some(Action::SpawnSh(_)))
+        let trigger = bind.key.trigger;
+
+        matches!(bind_action(bind), Some(Action::Spawn(_)) | Some(Action::SpawnSh(_)))
             // Only show binds with Mod or Super to filter out stuff like volume up/down.
-            && (bind.key.modifiers.contains(Modifiers::COMPOSITOR)
+            // A bind on a modifier key itself needs no held modifiers.
+            && (trigger.is_modifier()
+                || bind.key.modifiers.contains(Modifiers::COMPOSITOR)
                 || bind.key.modifiers.contains(Modifiers::SUPER))
             // Also filter out wheel and touchpad scroll binds.
-            && matches!(bind.key.trigger, Trigger::Keysym(_))
+            && (trigger.is_modifier() || matches!(trigger, Trigger::Keysym(_)))
     }) {
-        let action = bind.press_action().unwrap();
+        let action = bind_action(bind).unwrap();
 
         // We only show one bind for each action, so we need to deduplicate the Spawn actions.
         if !actions.contains(&action) {
@@ -313,7 +323,7 @@ fn collect_actions(config: &Config) -> Vec<&Action> {
 
     if config.hotkey_overlay.hide_not_bound {
         // Only keep actions that have been bound
-        actions.retain(|&action| binds.iter().any(|bind| bind.press_action() == Some(action)))
+        actions.retain(|&action| binds.iter().any(|bind| bind_triggers(bind, action)))
     }
 
     actions
@@ -726,6 +736,33 @@ mod tests {
             @" Super + Control_R : Close Focused Window"
         );
 
+        // A release bind is shown too.
+        assert_snapshot!(
+            check(
+                r#"binds {
+                    Mod {
+                        release { toggle-overview; }
+                    }
+                }"#,
+                Action::ToggleOverview,
+            ),
+            @" Super : Open the Overview"
+        );
+
+        // Same for the release action of a bind with both actions.
+        assert_snapshot!(
+            check(
+                r#"binds {
+                    Mod+Shift+Q {
+                        press { close-window; }
+                        release { toggle-overview; }
+                    }
+                }"#,
+                Action::ToggleOverview,
+            ),
+            @" Super + Shift + Q : Open the Overview"
+        );
+
         // Bound with a default title.
         assert_snapshot!(
             check(
@@ -807,5 +844,51 @@ mod tests {
             ),
             @" Super + P : Hello"
         );
+    }
+
+    #[test]
+    fn test_collect_actions_release_binds() {
+        // Release binds count as bound, both for the actions that are always listed and for the
+        // ones that are only listed when bound.
+        let config = Config::parse_mem(
+            r#"binds {
+                Alt {
+                    release { screenshot; }
+                }
+                Mod {
+                    release { spawn "foot"; }
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let actions = collect_actions(&config);
+        assert!(actions.contains(&&Action::Screenshot(true, None)));
+        assert!(actions.contains(&&Action::Spawn(vec![String::from("foot")])));
+
+        // Release binds keep actions in the list with hide-not-bound.
+        let config = Config::parse_mem(
+            r#"binds {
+                Mod {
+                    release { toggle-overview; }
+                }
+            }
+            hotkey-overlay { hide-not-bound; }"#,
+        )
+        .unwrap();
+
+        assert!(collect_actions(&config).contains(&&Action::ToggleOverview));
+
+        // A release bind with a custom title adds its action to the list.
+        let config = Config::parse_mem(
+            r#"binds {
+                Mod+Q hotkey-overlay-title="Custom" {
+                    release { center-column; }
+                }
+            }"#,
+        )
+        .unwrap();
+
+        assert!(collect_actions(&config).contains(&&Action::CenterColumn));
     }
 }
